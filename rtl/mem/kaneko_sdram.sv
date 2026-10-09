@@ -493,6 +493,22 @@ module kaneko_sdram #(
                                         : PW'(arb_sum);
   end
 
+  // THE DECISION IS REGISTERED, AND RE-CHECKED WHEN IT IS USED.
+  //
+  // inflight -> ready -> rotate -> lowest set bit -> add -> port mux ->
+  // xfer_addr was one clock at 96 MHz, and on the Pocket's C8 part it missed
+  // by 0.6 ns. Registering the arbiter's choice splits that in two. A choice
+  // made one clock ago can be stale only if its port stopped pending or was
+  // granted since, and both are checked here; a port that has just started
+  // pending waits one extra clock. Grant order is otherwise unchanged.
+  logic [PW-1:0] rr_grant_q;
+  logic          rr_valid_q;
+  always_ff @(posedge clk) begin
+    rr_grant_q <= rr_grant;
+    rr_valid_q <= rr_valid;
+  end
+  wire rr_ok = rr_valid_q && pend[rr_grant_q] && !inflight[rr_grant_q];
+
   // ------------------------------------------------------------- transfer
   logic [$clog2(NP+1)-1:0] grant;
   logic                    grant_is_wr;
@@ -544,6 +560,12 @@ module kaneko_sdram #(
   logic                     ref_pend;
   logic [3:0]               wait_cnt;
   logic [15:0]              dq_r;
+
+  // THE CAPTURE REGISTER HAS NO RESET AND NOTHING BETWEEN IT AND THE PIN, so
+  // Quartus can put it in the input cell (FAST_INPUT_REGISTER, ap_core.qsf).
+  // On the Pocket's C8 part the route from pin to a fabric register cost up
+  // to 2.5 ns at 96 MHz and failed timing; in the I/O cell it does not.
+  always_ff @(posedge clk) dq_r <= sd_dq_i;
 
   // TAGGED READ CAPTURE
   //
@@ -640,11 +662,10 @@ module kaneko_sdram #(
       grant <= '0; grant_is_wr <= 1'b0; rr_next <= '0;
       rd_total <= 4'd1; rd_issued <= '0; rd_captured <= '0;
       is_write <= 1'b0; xfer_addr <= '0; din_r <= '0; be_r <= '0;
-      wait_cnt <= '0; dq_r <= '0;
+      wait_cnt <= '0;
     end else begin
       cmd      <= C_NOP;
       sd_dq_oe <= 1'b0;
-      dq_r     <= sd_dq_i;
 
       for (int q = 0; q < NP; q++) begin
         if (ack_cnt[q] != 0) ack_cnt[q] <= ack_cnt[q] - 1'b1;
@@ -726,7 +747,7 @@ module kaneko_sdram #(
               state    <= S_PRE_REF;
             end else if (!ref_pend &&
                          ((wr_pend && !wr_inflight && !pipe_busy) ||
-                          (rr_valid && !(we_p[rr_grant] && pipe_busy)))) begin
+                          (rr_ok && !(we_p[rr_grant_q] && pipe_busy)))) begin
               // No new transfer once a refresh is due. Refresh needs every
               // bank precharged and the read pipeline empty, and under
               // continuous traffic the pipeline is never empty — so without
@@ -751,18 +772,18 @@ module kaneko_sdram #(
                 is_write    <= 1'b1;
                 rd_total    <= 4'd1;
               end else begin
-                grant       <= ($clog2(NP+1))'(rr_grant);
+                grant       <= ($clog2(NP+1))'(rr_grant_q);
                 grant_is_wr <= 1'b0;
-                sel         = addr_p[rr_grant];
-                din_r       <= din_p[rr_grant];
-                be_r        <= be_p[rr_grant];
-                is_write    <= we_p[rr_grant];
-                rd_total    <= we_p[rr_grant] ? 4'd1 : RD_BLEN;
+                sel         = addr_p[rr_grant_q];
+                din_r       <= din_p[rr_grant_q];
+                be_r        <= be_p[rr_grant_q];
+                is_write    <= we_p[rr_grant_q];
+                rd_total    <= we_p[rr_grant_q] ? 4'd1 : RD_BLEN;
                 // Writes take it too: a port writing is equally in flight and
                 // equally must not be re-selected before it completes.
-                inflight[rr_grant] <= 1'b1;
-                rr_next     <= (rr_grant == ($clog2(NP))'(NP-1))
-                                 ? '0 : rr_grant + 1'b1;
+                inflight[rr_grant_q] <= 1'b1;
+                rr_next     <= (rr_grant_q == ($clog2(NP))'(NP-1))
+                                 ? '0 : rr_grant_q + 1'b1;
               end
               xfer_addr   <= sel;
               rd_issued   <= '0;

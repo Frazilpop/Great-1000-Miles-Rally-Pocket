@@ -42,7 +42,8 @@ HARNESSES := kaneko_tmap:kaneko_tmap_layer:sim/video/tb_kaneko_tmap.cpp \
              kaneko_tilerom:kaneko_tilerom_harness:sim/video/tb_kaneko_tilerom.cpp \
              kaneko_tmap_line:kaneko_tmap_line:sim/video/tb_kaneko_tmap_line.cpp \
              kaneko_tline:kaneko_tline_harness:sim/video/tb_kaneko_tline.cpp \
-             kaneko_oki:kaneko_oki_harness:sim/sound/tb_kaneko_oki.cpp:JT6295
+             kaneko_oki:kaneko_oki_harness:sim/sound/tb_kaneko_oki.cpp:JT6295 \
+             kaneko_toybox:kaneko_toybox:sim/mcu/tb_kaneko_toybox.cpp
 
 .PHONY: all lint test clean area
 # GCC writes temporaries to $TMPDIR, which defaults to /tmp — a 16 GB tmpfs

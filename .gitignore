@@ -139,3 +139,16 @@ Thumbs.db
 /CLAUDE.md
 # Working notes, kept on disk but not published.
 /docs/
+
+# fx68k microcode, linked next to the Pocket project (see board.qip)
+/pocket/src/fpga/microrom.mem
+/pocket/src/fpga/nanorom.mem
+
+# MAME's own cfg/nvram directories, left by a run started from the repo root
+/cfg/
+/nvram/
+
+# Quartus and build products that land outside build/
+/pocket/src/fpga/c5_pin_model_dump.txt
+/pocket/dist/Cores/*/bitstream.rbf_r
+

@@ -1,0 +1,30 @@
+`verilator_config
+// Third-party and vendor files are linted for errors only: their style is
+// their own, and they are used unmodified.
+lint_off -file "*/third_party/*"
+lint_off -file "*/pocket/src/fpga/apf/*"
+lint_off -file "*/pocket/src/fpga/core/core_bridge_cmd.v"
+lint_off -file "*/pocket/src/fpga/core/pin_ddio_clk.v"
+lint_off -file "*/pocket/src/fpga/core/mf_pllbase*"
+lint_off -file "*/pocket/lint/altera_stubs.v"
+// The board is a stub with final ports and is someone else's file.
+lint_off -rule UNUSEDSIGNAL -file "*/pocket/src/fpga/board_stub/*"
+lint_off -rule PROCASSINIT -file "*/pocket/src/fpga/board_stub/*"
+lint_off -file "*/rtl/mem/*"
+// core_top.v carries Analogue's full pin list and command-bridge status set;
+// most of it is unused by this core by design (cart, link, IR, pads 3-4,
+// analog sticks, RTC, savestates). Initial values on registers are FPGA
+// power-up values, deliberately.
+lint_off -rule UNUSEDSIGNAL -file "*/pocket/src/fpga/core/core_top.v"
+lint_off -rule PROCASSINIT  -file "*/pocket/src/fpga/core/*"
+// reset_n / dataslot_allcomplete are driven inside core_bridge_cmd (vendor)
+// from more than one block; Verilator reports that against the parent net.
+lint_off -rule MULTIDRIVEN  -file "*/pocket/src/fpga/core/core_top.v"
+// Unused rise/fall outputs of APF's synch_3, left open by name on purpose.
+lint_off -rule PINCONNECTEMPTY
+// data_loader hands out BYTE addresses; a 16-bit word never uses bit 0.
+lint_off -rule UNUSEDSIGNAL -file "*/pocket/src/fpga/core/pocket_*.sv" -match "*'ld_addr'[0]*"
+// Analogue's command bridge, reported against its own lines late in
+// elaboration, where the file-wide waiver above does not reach.
+lint_off -rule COMBDLY     -file "*/core_bridge_cmd.v"
+lint_off -rule MULTIDRIVEN -file "*/core_bridge_cmd.v"

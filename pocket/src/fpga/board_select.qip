@@ -1,0 +1,12 @@
+# Which board to build. Normally the real one, board.qip.
+#
+# pocket/build.sh --stub sets KANEKO16_BOARD=stub in the container, which swaps
+# in board_stub/ — the contract's ports with every output tied off — so the
+# Pocket shell's own fit and timing can be measured while the board is being
+# written. Edit board.qip, not this file, to add board RTL.
+if {[info exists ::env(KANEKO16_BOARD)] && $::env(KANEKO16_BOARD) eq "stub"} {
+    post_message -type warning "board_select.qip: building with the STUB board (board_stub/), not rtl/top/kaneko_gtmr.sv"
+    set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) board_stub/board_stub.qip]
+} else {
+    set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) board.qip]
+}

@@ -1,0 +1,5 @@
+# Pinned upstream revisions. Regenerate with tools/bootstrap.sh --update
+# 2026-08-20T22:15:30Z
+fx68k          jtfpga/fx68k 1217ab8dc600de070c6adb71ea6fe69de8855362
+jt6295         jotego/jt6295 7d76b0be8cd8f85f3ae741178c9830b20e2071a1
+mame           mamedev/mame 1ff7d66e66ac10ad0541af0cab3a47336ade5c47

@@ -1,0 +1,37 @@
+# The board's RTL: everything kaneko_gtmr needs that is not part of the Pocket
+# shell. ap_core.qsf pulls it in whole. Keep in step with sim/gtmr/build.sh,
+# which compiles the same list (with fx68k's hdl/verilator/ variant instead).
+#
+# Paths are relative to this file (pocket/src/fpga), via $::quartus(qip_path),
+# so the list works from any project that includes it.
+
+set q $::quartus(qip_path)
+set r [file join $q ../../../rtl]
+set t [file join $q ../../../third_party]
+
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r top/kaneko_gtmr.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r cpu/kaneko_gtmr_bus.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r cpu/kaneko_irq.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r io/kaneko_hit.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r mcu/kaneko_toybox.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r mem/kaneko_gtmr_vmem.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_video_timing.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_regs16.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_tilerom.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_tmap.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_tmap_fetch.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_tmap_line.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_kc002.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r video/kaneko_gtmr_mixer.sv]
+
+# fx68k: hdl/ is ijor's synthesis code. Its microcode is read with
+# $readmemb("microrom.mem") relative to the project directory, so the two
+# .mem files are linked next to ap_core.qpf (pocket/src/fpga/*.mem).
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $t fx68k/hdl/fx68k.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $t fx68k/hdl/fx68kAlu.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $t fx68k/hdl/uaddrPla.sv]
+
+foreach f {jt6295.v jt6295_acc.v jt6295_adpcm.v jt6295_ctrl.v jt6295_rom.v
+           jt6295_serial.v jt6295_sh_rst.v jt6295_timing.v jt12_comb.v jt12_interpol.v} {
+    set_global_assignment -name VERILOG_FILE [file join $t jt6295/hdl $f]
+}

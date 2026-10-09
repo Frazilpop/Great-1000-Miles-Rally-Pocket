@@ -1,0 +1,3 @@
+# The stub board: same module and ports as rtl/top/kaneko_gtmr.sv, outputs tied
+# off. Selected by board_select.qip when KANEKO16_BOARD=stub.
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) kaneko_gtmr_stub.sv]

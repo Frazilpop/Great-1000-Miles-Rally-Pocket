@@ -686,6 +686,7 @@ assign rom_addr[4] = p4_addr;
 logic [31:0] dg_wait, dg_wait_max;
 logic [23:0] dg_wait_addr;
 logic [15:0] dg_cycles, dg_stall_frames, dg_draw_max;
+logic [7:0]  dg_over_base;   // KC-002 overruns at the last clear: the chip's count is since reset
 logic        dg_as_q, dg_armed;
 wire         dg_as = ~ASn & ~cpu_iack;
 always_ff @(posedge clk) begin
@@ -693,6 +694,7 @@ always_ff @(posedge clk) begin
     if (cpu_rst || diag_clr) begin
         dg_wait <= '0; dg_wait_max <= '0; dg_wait_addr <= '0;
         dg_cycles <= '0; dg_stall_frames <= '0; dg_draw_max <= '0;
+        dg_over_base <= spr_overruns;
         dg_armed <= 1'b0;
     end else begin
         if (dg_as && !dg_as_q) begin
@@ -718,7 +720,7 @@ assign diag_wait_max     = dg_wait_max;
 assign diag_wait_addr    = dg_wait_addr;
 assign diag_stall_frames = dg_stall_frames;
 assign diag_draw_max     = dg_draw_max;
-assign diag_spr_overruns = spr_overruns;
+assign diag_spr_overruns = spr_overruns - dg_over_base;
 
 endmodule
 

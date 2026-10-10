@@ -193,6 +193,23 @@ for entry in "${DEPS[@]}"; do
   fi
 
   printf '%-14s %s %s\n' "$name" "$repo" "$(pin "$dest")" >> "$LOCK.tmp"
+
+  # Local patches: tools/patches/<name>-*.patch, made with `git -C
+  # third_party/<name> diff`, applied on top of the pin. The clone stays
+  # upstream's plus a diff that is committed here, so a fresh checkout builds
+  # the same core. Already applied (reverse applies cleanly) is skipped; one
+  # that no longer applies after --update is a warning to go and rebase it.
+  for patch in "$ROOT"/tools/patches/"$name"-*.patch; do
+    [ -f "$patch" ] || continue
+    if git -C "$dest" apply --reverse --check "$patch" 2>/dev/null; then
+      echo "  $name: $(basename "$patch") already applied"
+    elif git -C "$dest" apply --check "$patch" 2>/dev/null; then
+      git -C "$dest" apply "$patch"
+      echo "  $name: applied $(basename "$patch")"
+    else
+      warn "  $name: $(basename "$patch") does not apply to $(pin "$dest") — rebase it"
+    fi
+  done
 done
 
 # ------------------------------------------------------------------ MAME

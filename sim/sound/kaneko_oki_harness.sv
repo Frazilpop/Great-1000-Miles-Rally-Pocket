@@ -27,6 +27,7 @@ module kaneko_oki_harness #(
     output wire [7:0]  oki_dout,
 
     input  wire        cen,           // 2 MHz enable from Kaneko16.sv
+    input  wire        ss,            // PIN7: 1 = /132 (explbrkr), 0 = /165 (gtmr)
     input  wire [7:0]  ym0_iob_out,   // bank select, YM2149 chip 0 port B
 
     output wire signed [13:0] oki_snd,
@@ -122,7 +123,7 @@ module kaneko_oki_harness #(
 
     jt6295 u_oki (
         .rst(rst), .clk(clk), .cen(cen),
-        .ss(1'b1),
+        .ss(ss),
         .wrn(~oki_we), .din(oki_din), .dout(oki_dout),
         .rom_addr(rom_addr), .rom_data(rom_data), .rom_ok(rom_ok),
         .sound(oki_snd), .sample()

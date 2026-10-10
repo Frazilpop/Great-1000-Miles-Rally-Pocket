@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
     dut = new Vkaneko_oki_harness;
 
     dut->rst = 1; dut->oki_we = 0; dut->oki_din = 0; dut->ym0_iob_out = 0;
+    dut->ss = 1;            // explbrkr: PIN7 high
     tick(16);
     dut->rst = 0;
     tick(16);
@@ -173,6 +174,60 @@ int main(int argc, char** argv) {
         check(got == t.want, "per-game bank limit");
     }
     printf("  per-game bank limits check out for wingforc (3) and mgcrystl (1)\n");
+
+
+    // ---------------------------------------------------------------- 6
+    // gtmr's sound routine (program 0xd232): to play a phrase on a channel
+    // it writes STOP for that channel, then spins on the status register
+    // until the channel's bit is clear, then the phrase byte, spins again,
+    // then channel|volume. MAME clears the bit the instant the stop lands,
+    // so the game never spins there. The Pocket hitches for 0.5-1 s on a
+    // crash with the 68000 running free; this measures how long jt6295
+    // keeps the bit up after a stop, on a channel that is playing, with
+    // gtmr's PIN7 low, through the exact sequence MAME logged at a crash
+    // (build/mame/crash2/io.txt f1377-f1382). A spin here is clocks at
+    // 48 MHz; a frame is 811,008.
+    printf("== gtmr: stop a playing channel, then retrigger (PIN7 low)\n");
+    dut->rst = 1; dut->ss = 0; tick(16); dut->rst = 0; tick(16);
+    const long FRAME = 811008;
+    long worst_spin = 0;
+    auto spin_until_clear = [&](int ch, const char* what) {
+        long n = 0;
+        while ((dut->oki_dout & (1 << ch)) && n < 60 * FRAME) { tick(); n++; }
+        if (n > worst_spin) worst_spin = n;
+        if (n >= 60 * FRAME) printf("  %s: ch%d busy bit NEVER cleared\n", what, ch);
+        return n;
+    };
+    auto play = [&](int ch, int phrase, int vol, const char* tag) {
+        write_oki((1 << ch) << 3);           // stop: channel mask in bits 6:3, as the game sends it
+        long s1 = spin_until_clear(ch, "after stop");
+        write_oki(0x80 | phrase);
+        long s2 = spin_until_clear(ch, "after phrase");
+        write_oki((1 << (ch + 4)) | vol);
+        printf("  %-28s ch%d phrase %02x: spins %ld / %ld clocks\n", tag, ch, phrase, s1, s2);
+    };
+    // The engine loop on ch3 and a skid on ch2, as in play before a crash
+    play(3, 0x43, 2, "engine (f1375)");
+    tick(FRAME);
+    play(2, 0x1b, 4, "skid (f1376)");
+    tick(FRAME);
+    // The crash: five sounds in six frames, the game's own order
+    play(1, 0x19, 2, "crash f1377");
+    tick(FRAME);
+    play(3, 0x42, 2, "engine again f1378");
+    tick(FRAME);
+    check(dut->oki_dout & 0x08, "the retriggered channel is not playing a frame later");
+    play(2, 0x1b, 4, "skid again f1379");
+    tick(FRAME);
+    play(0, 0x14, 1, "f1380");
+    tick(2 * FRAME);
+    play(2, 0x1b, 4, "skid again f1382");
+    // Worst case: two retriggers of a busy channel back to back
+    tick(1000);
+    play(3, 0x43, 2, "retrigger back-to-back 1");
+    play(3, 0x42, 2, "retrigger back-to-back 2");
+    printf("  worst spin %ld clocks (%.2f frames)\n", worst_spin, worst_spin / (double)FRAME);
+    check(worst_spin < FRAME / 4, "the game would spin on the OKI status for a visible time");
 
     printf("\ntb_kaneko_oki: %ld checks, %ld fails\n", checks, fails);
     delete dut;

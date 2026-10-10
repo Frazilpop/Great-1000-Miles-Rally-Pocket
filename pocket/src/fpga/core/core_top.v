@@ -387,33 +387,42 @@ wire [31:0] nv_bridge_rd;
 //                        [7]    pedal: potentiometer       gtmr2 family
 //                        [9:8]  anthem & flag: 0 memory, 1 anthem only,
 //                               2 flag only, 3 none        gtmr family
-//   0xF1000004 [0]     test switch, held while set
-//   0xF1000008         write: service coin, a 100 ms press
+//                      Only OPT_MENU's fields are offered in the menu (Test
+//                      Mode, bit 0); the rest are held at 0 whatever APF has
+//                      saved from older menus. Flip and cocktail need the
+//                      tilemap flip this core does not draw, the wheels an
+//                      analogue input it does not have, and the others are
+//                      cabinet wiring a Pocket has no use for; the table
+//                      stays so a field can come back by widening OPT_MENU.
+//                      Changing Test Mode resets the game, since the game
+//                      reads the switch at boot.
 //   0xF100000C         write: reset the game (1 ms)
-//   0xF1000010 [1:0]   SDRAM read capture: 0 default, see RD_LAT_* below
 //   0xF1000014 [0]     diagnostic overlay (pocket_diag), see DIAGNOSTICS
+//
+// The test switch (0xF1000004), service coin (0xF1000008) and SDRAM read
+// capture (0xF1000010) left the menu on 10 Oct 2026: Test Mode does what the
+// held test switch did, Select is the coin, and the capture point is fixed at
+// the measured CL+2 (READ CAPTURE DEPTH below).
+
+localparam [31:0] OPT_MENU = 32'h0000_0001;
 
 reg  [2:0]  game_74  = 3'd0;
 reg  [31:0] opt_74   = 32'd0;
-reg         test_74  = 1'b0;
-reg  [1:0]  sdsel_74 = 2'd0;
 reg         diag_74  = 1'b0;
-reg  [22:0] coin_cnt = 23'd0;               // 100 ms at 74.25 MHz = 7,425,000
-reg  [16:0] hrst_cnt = 17'd0;               //   1 ms               =    74,250
-wire        coin_74  = (coin_cnt != 23'd0);
+reg  [16:0] hrst_cnt = 17'd0;               //   1 ms at 74.25 MHz = 74,250
 wire        hrst_74  = (hrst_cnt != 17'd0);
+wire [31:0] opt_wr   = bridge_wr_data & OPT_MENU;
 
 always @(posedge clk_74a) begin
-    if (coin_cnt != 23'd0) coin_cnt <= coin_cnt - 23'd1;
     if (hrst_cnt != 17'd0) hrst_cnt <= hrst_cnt - 17'd1;
     if (bridge_wr) begin
         case (bridge_addr)
         32'hF0000000: game_74  <= bridge_wr_data[2:0];
-        32'hF1000000: opt_74   <= bridge_wr_data;
-        32'hF1000004: test_74  <= bridge_wr_data[0];
-        32'hF1000008: coin_cnt <= 23'd7425000;
+        32'hF1000000: begin
+            opt_74 <= opt_wr;
+            if (opt_wr[0] != opt_74[0]) hrst_cnt <= 17'd74250;
+        end
         32'hF100000C: hrst_cnt <= 17'd74250;
-        32'hF1000010: sdsel_74 <= bridge_wr_data[1:0];
         32'hF1000014: diag_74  <= bridge_wr_data[0];
         default: ;
         endcase
@@ -425,8 +434,6 @@ always @(posedge clk_74a) begin
     32'h2???????: bridge_rd_data <= nv_bridge_rd;
     32'hF0000000: bridge_rd_data <= {29'd0, game_74};
     32'hF1000000: bridge_rd_data <= opt_74;
-    32'hF1000004: bridge_rd_data <= {31'd0, test_74};
-    32'hF1000010: bridge_rd_data <= {30'd0, sdsel_74};
     32'hF1000014: bridge_rd_data <= {31'd0, diag_74};
     32'hF8??????: bridge_rd_data <= cmd_bridge_rd_data;
     default:      bridge_rd_data <= 32'd0;
@@ -628,12 +635,12 @@ core_bridge_cmd icb (
 // ======================================================= settings -> 48 MHz
 wire [2:0]  game;
 wire [15:0] dsw;
-wire        test_sw, service_coin, host_rst, diag_opt;
+wire        host_rst, diag_opt;
 
-pocket_sync_bus #(.W(23), .INIT({3'd0, 16'hff00, 4'b0000})) s_cfg48 (
+pocket_sync_bus #(.W(21), .INIT({3'd0, 16'hff00, 2'b00})) s_cfg48 (
     .clk (clk_core),
-    .d   ({game_74, dsw_74, test_74, coin_74, hrst_74, diag_74}),
-    .q   ({game,    dsw,    test_sw, service_coin, host_rst, diag_opt})
+    .d   ({game_74, dsw_74, hrst_74, diag_74}),
+    .q   ({game,    dsw,    host_rst, diag_opt})
 );
 
 wire board_rst = rst_por | ~reset_n_48 | host_rst;
@@ -749,36 +756,22 @@ kaneko_sdram_x2 #(.NP(NPS), .AW(SDR_AW)) u_sdr_x2 (
     .f_wr_be  (f_wr_be),  .f_wr_ack (f_wr_ack)
 );
 
-// READ CAPTURE DEPTH (kaneko_sdram rd_lat_sel), from the interact menu.
+// READ CAPTURE DEPTH (kaneko_sdram rd_lat_sel), fixed.
 //
 // kaneko_sdram's encoding is 0 -> CL+1, 1 -> CL+0, 2 -> CL+2, 3 -> CL+3:
 // the pin is sampled into dq_r (cap_depth - 1) edges after the READ command.
-// The menu's first entry, register value 0, is the Pocket default.
 //
-// THE DEFAULT IS CL+2, MEASURED, NOT CL+3, TIMED. core_constraints.sdc times
+// THE DEPTH IS CL+2, MEASURED, NOT CL+3, TIMED. core_constraints.sdc times
 // the read data as a 2-cycle path from the forwarded device clock, which
 // says CL+3 on paper. On the Pocket (9 Oct 2026, pocket_diag's read-back of
 // the reset vector) CL+3 returned the line shifted one word early -- 0000
 // 0000 9E04 9E04 for 1100 0000 0000 9E04 -- i.e. the first word was already
 // on the bus one clock before the paper edge, and the last slot caught the
 // bus still holding the final word. One clock earlier is right, which is
-// what upstream measured on its board against the same paper. The paper
-// value stays in the menu as the second entry.
-localparam [1:0] RD_LAT_0 = 2'd2;   // menu 0: CL+2, Pocket default (measured)
-localparam [1:0] RD_LAT_1 = 2'd3;   // menu 1: CL+3, what the .sdc times
-localparam [1:0] RD_LAT_2 = 2'd0;   // menu 2: CL+1
-localparam [1:0] RD_LAT_3 = 2'd1;   // menu 3: CL+0
-
-wire [1:0] sdsel_96;
-pocket_sync_bus #(.W(2)) s_sdsel96 (.clk(clk_sdram), .d(sdsel_74), .q(sdsel_96));
-reg  [1:0] rd_lat_sel;
-always @(posedge clk_sdram)
-    case (sdsel_96)
-    2'd0: rd_lat_sel <= RD_LAT_0;
-    2'd1: rd_lat_sel <= RD_LAT_1;
-    2'd2: rd_lat_sel <= RD_LAT_2;
-    default: rd_lat_sel <= RD_LAT_3;
-    endcase
+// what upstream measured on its board against the same paper. It was a menu
+// choice (CL+2, CL+3, CL+1, CL+0) until 10 Oct 2026; the overlay's counters
+// 6/7 and flag 7 still check it on every frame.
+wire [1:0] rd_lat_sel = 2'd2;       // CL+2
 
 wire        sd_cs_n_unused;
 wire        sd_dq_oe;
@@ -984,8 +977,8 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
     .p2         (in_p2),
     .coin       (in_coin),
     .start      (in_start),
-    .service    (service_coin),
-    .test       (test_sw),
+    .service    (1'b0),             // no service coin: Select is the coin
+    .test       (1'b0),             // no test button: Test Mode is the DIP
     .dsw        (dsw),
 
     .nv_addr    (nv_addr),
@@ -1040,8 +1033,7 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
 // The read-back is port NP of the controller: once per frame, after
 // rom_loaded, it reads line 0 (the 68000's reset vector) and the overlay
 // shows it beside the loader's copy (flag 7 is the comparison; the loader's
-// copy itself is no longer shown). It re-reads every frame, so changing
-// "SDRAM Read Capture" in the menu shows its effect live.
+// copy itself is no longer shown). It re-reads every frame.
 wire        mem_ready_48;
 synch_3 s_memrdy48 (.i(mem_ready), .o(mem_ready_48), .clk(clk_core), .rise(), .fall());
 

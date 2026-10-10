@@ -82,6 +82,10 @@ module kaneko_gtmr #(
     input  wire        service, test,
     input  wire [15:0] dsw,
 
+    // Freezes the game: the 68000 stops between bus cycles and the OKIs stop
+    // where they are. Video keeps running, so the picture holds.
+    input  wire        pause,
+
     // EEPROM backup
     input  wire [5:0]  nv_addr,
     input  wire [15:0] nv_din,
@@ -118,23 +122,35 @@ reg [2:0] ce_div;
 always @(posedge clk) ce_div <= ce_div + 3'd1;
 wire ce_pix_i = (ce_div == 3'd0);
 
-// 68000: 16 MHz from 48 is three clocks per CPU clock, one phase enable on
-// each of two of them. fx68k is fully synchronous to `clk` and only cares
-// that the phases alternate; the uneven spacing is invisible to it.
-reg [1:0] cpu_ph;
-always @(posedge clk) cpu_ph <= (cpu_ph == 2'd2) ? 2'd0 : cpu_ph + 2'd1;
-wire enPhi1 = (cpu_ph == 2'd0);
-wire enPhi2 = (cpu_ph == 2'd1);
-
-// OKIs: 16 MHz / 8 = 2 MHz, i.e. 48 / 24.
-reg [4:0] oki_div;
-always @(posedge clk) oki_div <= (oki_div == 5'd23) ? 5'd0 : oki_div + 5'd1;
-wire oki_cen = (oki_div == 5'd0);
-
 // ================================================================ resets
 // Held until the ROM is in SDRAM: fetching earlier reads whatever the memory
 // powered up with as reset vectors.
 wire cpu_rst = rst | ~rom_loaded;
+
+// ================================================================ clocks (68000, OKI)
+// 68000: 16 MHz from 48 is three clocks per CPU clock, one phase enable on
+// each of two of them. fx68k is fully synchronous to `clk` and only cares
+// that the phases alternate; the uneven spacing is invisible to it.
+//
+// Pause withholds both enables, so fx68k simply stands still. It takes hold
+// only while AS is high, so no device is left part-way through a bus cycle
+// (the 68000 is never more than one bus cycle from AS going high), and lets
+// go at once. Never in reset: fx68k needs its enables to come out of one.
+wire      ASn, LDSn, UDSn, eRWn, DTACKn;
+reg [1:0] cpu_ph;
+reg       cpu_hold;
+always @(posedge clk) begin
+    cpu_ph <= (cpu_ph == 2'd2) ? 2'd0 : cpu_ph + 2'd1;
+    if (!pause || cpu_rst) cpu_hold <= 1'b0;
+    else if (ASn)          cpu_hold <= 1'b1;
+end
+wire enPhi1 = (cpu_ph == 2'd0) & ~cpu_hold;
+wire enPhi2 = (cpu_ph == 2'd1) & ~cpu_hold;
+
+// OKIs: 16 MHz / 8 = 2 MHz, i.e. 48 / 24.
+reg [4:0] oki_div;
+always @(posedge clk) oki_div <= (oki_div == 5'd23) ? 5'd0 : oki_div + 5'd1;
+wire oki_cen = (oki_div == 5'd0) & ~cpu_hold;
 
 // ================================================================ timing
 wire [9:0] hcnt, vcnt;
@@ -153,7 +169,6 @@ kaneko_video_timing u_timing
 );
 
 // ================================================================ 68000
-wire        ASn, LDSn, UDSn, eRWn, DTACKn;
 wire [15:0] oEdb, iEdb;
 wire [23:1] eab;
 wire [2:0]  cpu_fc;
@@ -193,10 +208,17 @@ wire [1:0]  dbg_ds    /*verilator public_flat_rd*/ = {~UDSn, ~LDSn};
 `define GTMR_IRQ3_LINE 144
 `endif
 
+// Paused, the interrupt block sees the scanline stand still, so no level is
+// raised for the lines that pass: the game resumes where it stopped instead of
+// taking a pile of stale interrupts back to back. Unpaused it is vcnt itself.
+logic [9:0] vcnt_frz;
+always_ff @(posedge clk) if (!cpu_hold) vcnt_frz <= vcnt;
+wire  [9:0] irq_vcnt = cpu_hold ? vcnt_frz : vcnt;
+
 kaneko_irq #(.LINE_IRQ4(`GTMR_IRQ4_LINE), .LINE_IRQ3(`GTMR_IRQ3_LINE)) u_irq
 (
     .clk(clk), .rst(cpu_rst),
-    .vcnt(vcnt),
+    .vcnt(irq_vcnt),
     .fc(cpu_fc), .as(~ASn), .a_level(eab[3:1]),
     .ipl_n(cpu_ipl_n), .vpa_n(cpu_vpa_n), .iack(cpu_iack)
 );
@@ -709,8 +731,8 @@ always_ff @(posedge clk) begin
         end
         if (vbl_rise) begin
             dg_cycles <= '0;
-            dg_armed  <= 1'b1;        // the first frame after a clear is partial
-            if (dg_armed && dg_cycles < 16'd8192 && dg_stall_frames != 16'hffff)
+            dg_armed  <= ~cpu_hold;   // the first frame after a clear or a pause is partial
+            if (dg_armed && !cpu_hold && dg_cycles < 16'd8192 && dg_stall_frames != 16'hffff)
                 dg_stall_frames <= dg_stall_frames + 16'd1;
         end
         if (spr_draw_clocks > dg_draw_max) dg_draw_max <= spr_draw_clocks;

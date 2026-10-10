@@ -25,7 +25,7 @@
 //   fb0/fb1    alternating row write/read, masks from a counter
 //   nv         a 64-word array behind the nv_* port, as the EEPROM would be
 //   video      384x264 timing from ce_pix = clk/8, visible 320x240 from line 16
-//   inputs     game, p1/p2, coin, start, service, test, dsw, dl_* all folded in
+//   inputs     game, p1/p2, coin, start, service, test, pause, dsw, dl_* all folded in
 //
 // It proves nothing about the data; it keeps every path alive so that fit and
 // timing describe the shell that will really be built. Its own logic is small
@@ -88,6 +88,7 @@ module kaneko_gtmr #(
     input  wire [1:0]  coin, start,
     input  wire        service, test,
     input  wire [15:0] dsw,
+    input  wire        pause,
 
     input  wire [5:0]  nv_addr,
     input  wire [15:0] nv_din,
@@ -232,7 +233,7 @@ always @(*) begin
 end
 always @(posedge clk)
     acc <= rfold ^ macc ^ facc[0] ^ facc[1] ^ dsw ^ {p1, p2}
-         ^ {game, coin, start, service, test, rom_loaded, 6'd0}
+         ^ {game, coin, start, service, test, pause, rom_loaded, 5'd0}
          ^ (dl_wr ? dl_data ^ dl_addr[16:1] : 16'd0);
 assign {r, g, b} = (hblank | vblank) ? 24'd0 : {acc, acc[7:0]};
 assign snd = acc;

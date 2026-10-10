@@ -663,6 +663,13 @@ wire [7:0] in_p2    = k2[7:0];
 wire [1:0] in_coin  = {k2[14], k1[14]};
 wire [1:0] in_start = {k2[15], k1[15]};
 
+// Pause: the game is paused while the Pocket's own menu is open (APF's OS
+// notify, host command 0x00B0), and the picture behind the menu is blacked
+// out (after the overlay, below).
+wire inmenu_48;
+synch_3 s_inmenu48 (.i(osnotify_inmenu), .o(inmenu_48), .clk(clk_core), .rise(), .fall());
+wire pause = inmenu_48;
+
 // ========================================================= ROM -> SDRAM
 wire allcomplete_48;
 synch_3 s_allc48 (.i(dataslot_allcomplete), .o(allcomplete_48), .clk(clk_core), .rise(), .fall());
@@ -980,6 +987,7 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
     .service    (1'b0),             // no service coin: Select is the coin
     .test       (1'b0),             // no test button: Test Mode is the DIP
     .dsw        (dsw),
+    .pause      (pause),
 
     .nv_addr    (nv_addr),
     .nv_din     (nv_din),
@@ -1097,7 +1105,7 @@ wire [63:0] exp_line = {exp_w3, exp_w2, exp_w1, exp_w0};
 wire [15:0] diag_flags = {f_over, f_stall, f_wait, game, frame[5], diag_opt,
                           (rb_line == exp_line), board_rst, ldr_overflow, rom_loaded,
                           allcomplete_48, reset_n_48, mem_ready_48, locked_48};
-wire [7:0]  dr, dg, db;
+wire [7:0]  dr, dg, db, mr, mg, mb;
 pocket_diag u_diag (
     .clk    (clk_core),
     .ce_pix (ce_pix),
@@ -1114,6 +1122,9 @@ pocket_diag u_diag (
     .r_out  (dr), .g_out (dg), .b_out (db)
 );
 
+// Black behind the Pocket's menu: the game is paused under it.
+assign {mr, mg, mb} = inmenu_48 ? 24'd0 : {dr, dg, db};
+
 // ================================================================== video
 assign video_rgb_clock    = clk_vid;
 assign video_rgb_clock_90 = clk_vid90;
@@ -1125,9 +1136,9 @@ pocket_video u_video (
     .vs        (vs),
     .hblank    (hblank),
     .vblank    (vblank_b),
-    .r         (dr),
-    .g         (dg),
-    .b         (db),
+    .r         (mr),
+    .g         (mg),
+    .b         (mb),
     .clk_vid   (clk_vid),
     .video_rgb (video_rgb),
     .video_de  (video_de),

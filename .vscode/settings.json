@@ -23,8 +23,7 @@
     "third_party/mame",
     "third_party/fx68k",
     "third_party/jt6295",
-    "third_party/pocket-utils",
-    "third_party/pocket-template"
+    "third_party/pocket-utils"
   ],
 
   // Keep the file watcher off vendored source, its history, and Verilator

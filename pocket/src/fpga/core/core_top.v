@@ -26,7 +26,7 @@
 //   0xF1000000-   options (interact.json)               r/w, see below
 //   0xF8000000-   APF command bridge                    core_bridge_cmd
 //
-// DATA SLOTS (dist/Cores/frazilpop.Kaneko16/data.json), in table order:
+// DATA SLOTS (dist/Cores/frazilpop.Great 1000 Miles Rally/data.json), in table order:
 //
 //   [0] id 0  instance JSON (APF requires the instance slot to come first)
 //   [1] id 1  <set>.rom at 0x00000000

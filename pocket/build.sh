@@ -17,7 +17,7 @@
 # own pre-flow script, which rewrites apf/build_id.mif with the build date.
 #
 # Afterwards: the bit-reversed bitstream the Pocket loads is written to
-# pocket/dist/Cores/frazilpop.Kaneko16/bitstream.rbf_r — or, for --stub, to
+# pocket/dist/Cores/frazilpop.Great 1000 Miles Rally/bitstream.rbf_r — or, for --stub, to
 # build/pocket/quartus/bitstream_stub.rbf_r, because the stub board is a
 # traffic generator and must never be packaged — and the fit and the worst
 # slack per clock are printed. The script fails if any clock has negative
@@ -29,7 +29,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 fpga=$repo/pocket/src/fpga
 qb=$repo/build/pocket/quartus
-dist=$repo/pocket/dist/Cores/frazilpop.Kaneko16
+dist="$repo/pocket/dist/Cores/frazilpop.Great 1000 Miles Rally"
 image=raetro/quartus:21.1
 
 board=real

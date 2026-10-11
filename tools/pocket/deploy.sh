@@ -4,7 +4,7 @@
 #   tools/pocket/deploy.sh [/Volumes/NAME] [--keep]   (--keep is accepted and changes nothing)
 #   tools/pocket/deploy.sh --status                   is the current build on the card?
 #
-# Copies pocket/dist (Cores/frazilpop.Kaneko16 with the bitstream, the
+# Copies pocket/dist ("Cores/frazilpop.Great 1000 Miles Rally" with the bitstream, the
 # platform JSON and image, the instance JSONs under Assets/kaneko16/) onto the
 # Pocket's SD card, and each target set's build/pocket/<set>.rom (made by
 # tools/pocket/build_rom.py) to Assets/kaneko16/common/. A ROM image already on
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-CORE=frazilpop.Kaneko16
+CORE="frazilpop.Great 1000 Miles Rally"
 DIST="$REPO/pocket/dist"
 BIN="$DIST/Cores/$CORE/bitstream.rbf_r"
 ROMS="$REPO/build/pocket"

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Make the Pocket's two graphics for this core, in APF's raw format.
 
-  dist/Cores/frazilpop.Kaneko16/icon.bin   36 x 36, "K16"
+  dist/Cores/frazilpop.Great 1000 Miles Rally/icon.bin   36 x 36, "K16"
   dist/Platforms/_images/kaneko16.bin      521 x 165, from art/kaneko16-banner.png
                                            (drawn from the game's logo)
 
@@ -129,7 +129,7 @@ def main():
     icon = blank(36, 36)
     s, sc = "K16", 2
     draw_text(icon, s, (36 - text_width(s, sc)) // 2, (36 - 7 * sc) // 2, sc)
-    save(icon, os.path.join(DIST, "Cores", "frazilpop.Kaneko16", "icon.bin"))
+    save(icon, os.path.join(DIST, "Cores", "frazilpop.Great 1000 Miles Rally", "icon.bin"))
 
     # Platform image: 521 x 165, the banner art when it is there.
     W, H = 521, 165

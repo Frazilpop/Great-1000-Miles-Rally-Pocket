@@ -57,6 +57,7 @@ done
 DEPS=(
   "fx68k|jtfpga/fx68k|master|68000 main CPU|GPL-3.0-only|yes"
   "jt6295|jotego/jt6295|master|OKI M6295 ADPCM, 1-2x depending on title|GPL-3.0-or-later|yes"
+  "pocket-utils|agg23/analogue-pocket-utils|master|Pocket shell IP: data loader, PSRAM, I2S audio, sync FIFO|MIT|yes"
 )
 
 # --------------------------------------------------------------------- helpers
@@ -116,25 +117,12 @@ for t in verilator yosys; do
   if have "$t"; then echo "  $t        $(command -v $t)"
   else warn "  $t        MISSING — 'make test' and 'make area' will not run"; fi
 done
-# Hard rule 7: 17.0 only, by absolute path. Quartus is deliberately NOT on
-# PATH — 24.1std is also installed here, it accepts Cyclone V, and a stray
-# PATH entry is exactly how the wrong toolchain gets used without anyone
-# noticing.
-QROOT="${QUARTUS_ROOT:-/home/ben/intelFPGA_lite/17.0/quartus}"
-if [ -x "$QROOT/bin/quartus_map" ]; then
-  qv="$("$QROOT/bin/quartus_map" --version 2>/dev/null | grep -oE 'Version [0-9]+\.[0-9]+' | head -1 | cut -d' ' -f2)"
-  if [ "$qv" = "17.0" ]; then
-    echo "  quartus    $qv at $QROOT"
-  else
-    warn "  quartus    $qv at $QROOT — hard rule 7 wants 17.0. 'make quartus' will refuse."
-  fi
+# pocket/build.sh runs Quartus Prime Lite 21.1 in Docker (raetro/quartus:21.1,
+# linux/amd64; Colima on a Mac), so no Quartus install is needed here.
+if have docker && docker info >/dev/null 2>&1; then
+  echo "  docker     $(command -v docker) (pocket/build.sh: Quartus 21.1 in raetro/quartus:21.1)"
 else
-  warn "  quartus    not found at $QROOT — 'make quartus' will refuse. Set QUARTUS_ROOT."
-fi
-if have quartus_map; then
-  warn "  quartus    WARNING: a quartus_map is on PATH ($(command -v quartus_map))."
-  warn "             Hard rule 7 builds by absolute path; a PATH entry is how the"
-  warn "             wrong version gets used silently. Consider removing it."
+  warn "  docker     MISSING or not running — pocket/build.sh runs Quartus in Docker."
 fi
 if have mame; then echo "  mame       $(command -v mame)"
 else warn "  mame       MISSING — the oracle. Every open question here is answered by running it."; fi
@@ -327,6 +315,11 @@ Read this before copying a single line out of third_party/.
                Re-check on every --update: jotego has relicensed cores before,
                and the header in the file is what governs, not the LICENSE.
 
+  pocket-utils MIT — Adam Gastineau (agg23), 2022.
+               The Pocket shell's data loader, PSRAM controller, I2S audio and
+               sync FIFO, used in place from third_party/ by
+               pocket/src/fpga/ap_core.qsf. Permissive; keep the notice.
+
   mame         Mixed. The kaneko/ files vendored here carry BSD-3-Clause
                headers (Luca Elia, David Haywood). MAME as a whole is GPL-2.0.
                Check the header of every file you read, not the repo licence.
@@ -345,9 +338,11 @@ Useful paths now available:
   third_party/mame/src/mame/kaneko/kaneko_toybox.cpp   TOYBOX MCU, tier 3
   third_party/fx68k/hdl/fx68k.sv                       68000 (synthesis)
   third_party/fx68k/hdl/verilator/                     68000 (simulation)
+  third_party/pocket-utils/ip/                         the Pocket shell's IP
 
 The two files that matter first are kaneko_tmap.cpp and kaneko_spr.cpp. They
 are the whole of M0 and the only parts of this core nobody has written before.
 
 Next: make lint && make test    (hard rule 4 — before any Quartus build)
+      then sh pocket/build.sh   (the bitstream, into pocket/dist)
 NEXT

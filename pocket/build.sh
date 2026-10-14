@@ -18,12 +18,13 @@
 # start of every compile; it is ignored, not tracked, so a build leaves the
 # tree clean.
 #
-# Afterwards: the bit-reversed bitstream the Pocket loads is written to
-# pocket/dist/Cores/frazilpop.Great 1000 Miles Rally/bitstream.rbf_r — or, for --stub, to
-# build/pocket/quartus/bitstream_stub.rbf_r, because the stub board is a
-# traffic generator and must never be packaged — and the fit and the worst
-# slack per clock are printed. The script fails if any clock has negative
-# slack.
+# Afterwards: the fit and the worst slack per clock are printed, and only if
+# every clock meets timing is the bit-reversed bitstream the Pocket loads
+# written to pocket/dist/Cores/frazilpop.Great 1000 Miles Rally/bitstream.rbf_r
+# — or, for --stub, to build/pocket/quartus/bitstream_stub.rbf_r, because the
+# stub board is a traffic generator and must never be packaged. On negative
+# slack the script fails and leaves dist alone; the bitstream it made is kept
+# as build/pocket/quartus/bitstream.rbf_r.failed for a look.
 
 set -eu
 
@@ -121,8 +122,7 @@ rbf=$qb/output_files/ap_core.rbf
 if [ "$board" = stub ]; then
     rbf_r=$qb/bitstream_stub.rbf_r
 else
-    mkdir -p "$dist"
-    rbf_r=$dist/bitstream.rbf_r
+    rbf_r=$qb/bitstream.rbf_r.new
 fi
 python3 -I - "$rbf" "$rbf_r" <<'EOF'
 import sys
@@ -131,11 +131,12 @@ src, dst = sys.argv[1], sys.argv[2]
 table = bytes(int(f"{b:08b}"[::-1], 2) for b in range(256))
 data = open(src, "rb").read()
 open(dst, "wb").write(data.translate(table))
-print(f"== bitstream: {dst} ({len(data)} bytes)")
+print(f"== bitstream: {len(data)} bytes")
 EOF
 
 # ------------------------------------------------------------- reports
-python3 -I - "$qb/output_files" "$board" <<'EOF'
+status=0
+python3 -I - "$qb/output_files" "$board" <<'EOF' || status=$?
 import os, re, sys
 out, board = sys.argv[1], sys.argv[2]
 
@@ -189,3 +190,19 @@ if fail:
     sys.exit(1)
 print("== timing met")
 EOF
+
+# ------------------------------------------------------------- dist
+# A bitstream that misses timing never reaches dist, so deploy.sh cannot put
+# it on the card.
+if [ "$status" != 0 ]; then
+    [ "$board" = stub ] || mv "$rbf_r" "$qb/bitstream.rbf_r.failed"
+    echo "== bitstream NOT written to dist" >&2
+    exit 1
+fi
+if [ "$board" = stub ]; then
+    echo "== written: $rbf_r"
+else
+    mkdir -p "$dist"
+    mv "$rbf_r" "$dist/bitstream.rbf_r"
+    echo "== written: $dist/bitstream.rbf_r"
+fi

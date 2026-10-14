@@ -355,8 +355,10 @@ synch_3 s_rstn48 (.i(reset_n), .o(reset_n_48), .clk(clk_core), .rise(), .fall())
 //
 // Writes are broadcast: the two data_loaders inside pocket_rom_loader and
 // pocket_nvram pick out their own regions; the registers below pick out
-// theirs. Reads are muxed and REGISTERED: APF buffers bridge reads and allows
-// the data until the next read strobe, which is many cycles of clk_74a.
+// theirs. Reads are muxed and REGISTERED: APF buffers bridge reads by one
+// word, taking each read's bus value before it strobes bridge_rd, so a
+// region backed by memory answers the address of the last strobe
+// (pocket_nvram).
 
 wire [31:0] cmd_bridge_rd_data;
 wire [31:0] nv_bridge_rd;
@@ -911,6 +913,7 @@ wire        nv_we, nv_dirty, nv_dirty_clr;
 pocket_nvram u_nvram (
     .clk_74a             (clk_74a),
     .bridge_wr           (bridge_wr),
+    .bridge_rd           (bridge_rd),
     .bridge_endian_little(bridge_endian_little),
     .bridge_addr         (bridge_addr),
     .bridge_wr_data      (bridge_wr_data),

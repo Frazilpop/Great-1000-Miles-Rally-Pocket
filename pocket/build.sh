@@ -14,7 +14,9 @@
 # Generated files stay under build/ (the repo's rule): db/, incremental_db/
 # and output_files/ in the project directory are symlinks into
 # build/pocket/quartus/, made here on first use. The one exception is Analogue's
-# own pre-flow script, which rewrites apf/build_id.mif with the build date.
+# own pre-flow script, which writes apf/build_id.mif with the build date at the
+# start of every compile; it is ignored, not tracked, so a build leaves the
+# tree clean.
 #
 # Afterwards: the bit-reversed bitstream the Pocket loads is written to
 # pocket/dist/Cores/frazilpop.Great 1000 Miles Rally/bitstream.rbf_r — or, for --stub, to

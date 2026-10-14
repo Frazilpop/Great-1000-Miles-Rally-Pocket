@@ -28,6 +28,8 @@ timing/
 qdb/
 *.qws
 *.rpt
+# Written with the build date by Analogue's pre-flow script on every compile.
+/pocket/src/fpga/apf/build_id.mif
 # Quartus drops these in the project root regardless of
 # PROJECT_OUTPUT_DIRECTORY — there is no assignment that moves them, so rule 10
 # is enforced here instead.

@@ -4,11 +4,11 @@
         "metadata": {
             "platform_ids": ["kaneko16"],
             "shortname": "Great 1000 Miles Rally",
-            "description": "Great 1000 Miles Rally and Mille Miglia 2 (Kaneko gtmr board)",
+            "description": "Great 1000 Miles Rally and Mille Miglia 2 (Kaneko16)",
             "author": "frazilpop",
             "url": "https://github.com/Frazilpop/Great-1000-Miles-Rally-Pocket",
-            "version": "1.0.0",
-            "date_release": "2026-10-11"
+            "version": "1.0.1",
+            "date_release": "2026-10-14"
         },
         "framework": {
             "target_product": "Analogue Pocket",

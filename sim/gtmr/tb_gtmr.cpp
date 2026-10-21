@@ -2,7 +2,8 @@
 // Kaneko16 (Pocket) — whole-board harness for the gtmr board.
 //
 //   tb_gtmr <set.rom> <game id> <frames> <outdir> [dump frames, comma list]
-//          [--fb-lat N] [--rom-lat N] [--ram-lat N] [--inputs plan.txt]
+//          [--fb-lat N] [--rom-lat N] [--ram-lat N] [--sdram-serial N]
+//          [--inputs plan.txt]
 //
 // Hosts kaneko_gtmr the way the Pocket shell does, with behavioural memories:
 //
@@ -73,6 +74,7 @@ int main(int argc, char** argv) {
     std::string outdir = argv[4];
     std::set<int> dumps;
     int fb_lat = 96, rom_lat = 10, ram_lat = 4;
+    int sdr_serial = 0;
     const char* trace_path = nullptr;
     long trace_count = 0;
     bool trace_data_only = false;
@@ -83,6 +85,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "--fb-lat") && i + 1 < argc)       fb_lat  = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--rom-lat") && i + 1 < argc) rom_lat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ram-lat") && i + 1 < argc) ram_lat = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sdram-serial") && i + 1 < argc) sdr_serial = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc)   trace_path = argv[++i];
         else if (!strcmp(argv[i], "--trace-count") && i + 1 < argc) trace_count = atol(argv[++i]);
         else if (!strcmp(argv[i], "--trace-data-only"))          trace_data_only = true;
@@ -167,7 +170,20 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks\n");
+    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks\n");
+    // Tile line fetch: lines whose fetch was still running when the next
+    // line started (the display then reads a half-written bank), and the
+    // longest fetch, start to done.
+    uint64_t late_lines = 0, max_line = 0, line_t0 = 0;
+    bool line_run_prev = false;
+    // The same for the KC-002's scan-out of the sprite line from PSRAM.
+    uint64_t late_spr = 0, max_spr = 0, spr_t0 = 0;
+    bool spr_run_prev = false;
+    // --sdram-serial N: the Pocket's one SDRAM, roughly. One access at a time,
+    // N clocks each, the lowest-numbered waiting port first (kaneko_sdram's
+    // urgent ports 0-6 come before the sprite ports 7-8), and a refresh of
+    // 6 clocks every 350 (T_REFI 700 / T_RC 11 at 96 MHz).
+    int srv_port = -1, srv_cnt = 0, refi = 350;
 
     auto& R = *t->rootp;
     R.kaneko_gtmr__DOT__dbg_spr_off = no_sprites;
@@ -258,7 +274,29 @@ int main(int argc, char** argv) {
         // ---- inputs for the next edge, from the outputs of the last one
         uint32_t req = t->rom_req;
         uint32_t ack = 0;
-        for (int p = 0; p < NP; p++) {
+        if (sdr_serial) {
+            if (--refi <= 0 && srv_port < 0) { refi = 350; srv_port = NP; srv_cnt = 6; }
+            for (int p = 0; p < NP; p++)
+                if (!rp[p].busy && ((req >> p) & 1)) {
+                    rp[p].busy = 1;
+                    rp[p].addr = (uint32_t)getbits(t->rom_addr, p * SDR_AW, SDR_AW);
+                }
+            if (srv_port < 0)
+                for (int p = 0; p < NP; p++)
+                    if (rp[p].busy) { srv_port = p; srv_cnt = sdr_serial; break; }
+            if (srv_port >= 0 && --srv_cnt <= 0) {
+                if (srv_port < NP) {
+                    Port& P = rp[srv_port];
+                    ack |= 1u << srv_port;
+                    uint32_t w = P.addr & ~3u;
+                    for (int k = 0; k < 4; k++)
+                        setbits(t->rom_dout, srv_port * 64 + k * 16, 16, rom_word(w + k));
+                    P.busy = 0;
+                }
+                srv_port = -1;
+            }
+        }
+        else for (int p = 0; p < NP; p++) {
             Port& P = rp[p];
             if (!P.busy && ((req >> p) & 1)) {
                 P.busy = 1; P.cnt = rom_lat;
@@ -316,6 +354,18 @@ int main(int argc, char** argv) {
 
         tick();
 
+        {
+            bool run = R.kaneko_gtmr__DOT__u_line__DOT__running;
+            if (R.kaneko_gtmr__DOT__line_start && line_run_prev) late_lines++;
+            if (run && !line_run_prev) line_t0 = cyc;
+            if (!run && line_run_prev && cyc - line_t0 > max_line) max_line = cyc - line_t0;
+            line_run_prev = run;
+            bool so = R.kaneko_gtmr__DOT__u_spr__DOT__so_busy;
+            if (R.kaneko_gtmr__DOT__u_spr__DOT__fetch_go && spr_run_prev) late_spr++;
+            if (so && !spr_run_prev) spr_t0 = cyc;
+            if (!so && spr_run_prev && cyc - spr_t0 > max_spr) max_spr = cyc - spr_t0;
+            spr_run_prev = so;
+        }
         {
             bool as = R.kaneko_gtmr__DOT__dbg_as;
             if (as) as_clocks++;
@@ -380,7 +430,7 @@ int main(int argc, char** argv) {
                     fwrite(sprimg.data(), 2, sprimg.size(), f);
                     fclose(f);
                 }
-                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu\n", frame,
+                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu\n", frame,
                         (unsigned)R.kaneko_gtmr__DOT__spr_draw_clocks,
                         (unsigned)R.kaneko_gtmr__DOT__spr_overruns,
                         (unsigned long long)cyc,
@@ -389,7 +439,10 @@ int main(int argc, char** argv) {
                         (unsigned)R.kaneko_gtmr__DOT__u_spr__DOT__cap_tag,
                         (unsigned)R.kaneko_gtmr__DOT__u_spr__DOT__shown_tag,
                         (unsigned long long)max_wait, max_wait_addr,
-                        (unsigned long long)hold_clocks);
+                        (unsigned long long)hold_clocks,
+                        (unsigned long long)late_lines, (unsigned long long)max_line,
+                        (unsigned long long)late_spr, (unsigned long long)max_spr);
+                late_lines = 0; max_line = 0; late_spr = 0; max_spr = 0;
                 bus_cycles_f = bus_cycles; as_clocks_f = as_clocks;
                 max_wait = 0; max_wait_addr = 0; hold_clocks = 0;
                 fflush(stats);

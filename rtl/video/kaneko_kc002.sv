@@ -734,9 +734,15 @@ module kaneko_kc002 #(
     logic [15:0] lb_q;
     logic        lb_p;
     wire  [8:0]  rx = (rd_x < 9'd320) ? rd_x : 9'd0;
+    // lb_bank turns over at line_start, which is the END of pixel 0. The tile
+    // line buffer picks its bank after the read register and so gets away with
+    // that; here the bank is in the address, so pixel 0 has to ask for the next
+    // bank itself or it shows x=0 of the line above. That word was fetched first
+    // and long ago, so this takes nothing from the fetch's margin.
+    wire         rb = lb_bank ^ (hcnt == 10'd0);
     always_ff @(posedge clk) begin
-        lb_q <= lb[{lb_bank, rx}];
-        lb_p <= lb_present[lb_bank][rx[8:4]] && (rd_x < 9'd320);
+        lb_q <= lb[{rb, rx}];
+        lb_p <= lb_present[rb][rx[8:4]] && (rd_x < 9'd320);
     end
     assign spr_pix  = lb_p ? lb_q[13:0]  : 14'd0;
     assign spr_prio = lb_p ? lb_q[15:14] : 2'd0;

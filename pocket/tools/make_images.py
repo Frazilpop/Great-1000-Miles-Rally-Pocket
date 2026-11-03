@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Make the Pocket's two graphics for this core, in APF's raw format.
 
-  dist/Cores/frazilpop.Great 1000 Miles Rally/icon.bin   36 x 36, "K16"
+  dist/Cores/frazilpop.Great 1000 Miles Rally/icon.bin   36 x 36, kept in the repo; "K16" only if there is none yet
   dist/Platforms/_images/kaneko16.bin      521 x 165, from art/kaneko16-banner.png
                                            (drawn from the game's logo)
 
@@ -125,11 +125,14 @@ def save(canvas, path):
 
 
 def main():
-    # Core icon: 36 x 36, drawn at the 2x2 pixel scale Analogue recommends.
-    icon = blank(36, 36)
-    s, sc = "K16", 2
-    draw_text(icon, s, (36 - text_width(s, sc)) // 2, (36 - 7 * sc) // 2, sc)
-    save(icon, os.path.join(DIST, "Cores", "frazilpop.Great 1000 Miles Rally", "icon.bin"))
+    # Core icon: kept in the repo. Letters at Analogue's 2x2 pixel scale only
+    # until it is.
+    icon_bin = os.path.join(DIST, "Cores", "frazilpop.Great 1000 Miles Rally", "icon.bin")
+    if not os.path.exists(icon_bin):
+        icon = blank(36, 36)
+        s, sc = "K16", 2
+        draw_text(icon, s, (36 - text_width(s, sc)) // 2, (36 - 7 * sc) // 2, sc)
+        save(icon, icon_bin)
 
     # Platform image: 521 x 165, the banner art when it is there.
     W, H = 521, 165

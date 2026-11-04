@@ -451,7 +451,6 @@ int main(int argc, char** argv) {
                 apply_inputs(frame);
                 y = 0; x = 0;
             }
-            if (!vb && prev_vb) { y = 0; x = 0; }
             prev_hb = hb; prev_vb = vb;
         }
     }

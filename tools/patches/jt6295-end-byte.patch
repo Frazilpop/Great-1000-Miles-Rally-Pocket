@@ -1,0 +1,18 @@
+diff --git a/hdl/jt6295_serial.v b/hdl/jt6295_serial.v
+index 4dae4d3..9aff9de 100644
+--- a/hdl/jt6295_serial.v
++++ b/hdl/jt6295_serial.v
+@@ -116,7 +116,12 @@ wire [CSRW-1:0] csr_in, csr_out;
+ assign csr_in = { stop_in, cnt_in, att_in, busy_in };
+ assign {stop_out, cnt, att_out, busy_out } = csr_out;
+ assign rom_addr = cnt[18:1];
+-assign over     = rom_addr >= stop_out;
++// The end address is the phrase's last byte, both its nibbles played
++// (World-Rally-Pocket, 2026-10-21): MAME's okim6295 plays
++// 2 * (end - start + 1) nibbles. As written upstream a phrase ended with
++// the end byte's first nibble: set against MAME's voices channel by
++// channel, World Rally's phrases matched to the last sample but that one.
++assign over     = cnt >= { stop_out, 1'b1 };
+ 
+ jt6295_sh_rst #(.WIDTH(CSRW), .STAGES(4) ) u_cnt(
+     .rst    ( rst       ),

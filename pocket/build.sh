@@ -56,6 +56,15 @@ for f in "$repo/third_party/pocket-utils/ip/data_loader.sv" "$repo/rtl/mem/kanek
     [ -f "$f" ] || { echo "build.sh: missing $f (run tools/bootstrap.sh?)" >&2; exit 1; }
 done
 
+# jt6295 as upstream has it loses a STOP the game follows up at once, or that
+# another write lands on, stops a phrase a nibble early and can take the phrase
+# header's last byte before the ROM has brought it: the core would ship them
+# all. Each patch must reverse cleanly, i.e. be in place.
+for p in "$repo"/tools/patches/jt6295-*.patch; do
+    git -C "$repo/third_party/jt6295" apply --reverse --check "$p" 2>/dev/null || {
+        echo "build.sh: $(basename "$p") is not applied to third_party/jt6295 (run tools/bootstrap.sh)" >&2; exit 1; }
+done
+
 # ------------------------------------------------------------ one at a time
 # Two Quartus runs in one project write the same db/ and the same log, and
 # neither finishes cleanly. More than one thing can start this script, so it

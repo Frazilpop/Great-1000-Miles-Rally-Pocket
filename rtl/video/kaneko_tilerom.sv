@@ -127,6 +127,7 @@ module kaneko_tilerom #(
     generate
         for (g = 0; g < NREQ; g = g + 1) begin : g_fill
             state_t st;
+            logic [20:0] fill_tag;   // the block the burst was asked for
 
             always_ff @(posedge clk) begin
                 if (rst) begin
@@ -140,6 +141,7 @@ module kaneko_tilerom #(
                             // is what makes the block a block.
                             sdr_addr[g] <= SDR_AW'(base_addr[g]
                                    + SDR_AW'({req_addr[g][23:3], 2'b00}));
+                            fill_tag    <= req_addr[g][23:3];
                             sdr_req[g]  <= 1'b1;
                             st          <= S_WAIT;
                         end
@@ -148,13 +150,23 @@ module kaneko_tilerom #(
                             // Alternate entries so the block just evicted is
                             // the older of the two, which is what makes the
                             // A,B,A,B walk hit.
+                            //
+                            // The tag is the block asked for, not the address
+                            // now: a tile or sprite port waits on a miss, but
+                            // an OKI doesn't, and jt6295 moves its address to
+                            // a new phrase whenever the game writes one. Tagged
+                            // at the ack, the old phrase's header read as the
+                            // new one's, and the voice played the wrong sound
+                            // (3 of 345 phrases in a race, sim/sound/tb_gtmr_oki).
+                            // If the address has moved, this is a miss and the
+                            // next burst brings the right block.
                             if (LINES > 1 && fill_sel[g]) begin
                                 line1[g]  <= sdr_dout[g];
-                                tag1[g]   <= req_addr[g][23:3];
+                                tag1[g]   <= fill_tag;
                                 valid1[g] <= 1'b1;
                             end else begin
                                 line0[g]  <= sdr_dout[g];
-                                tag0[g]   <= req_addr[g][23:3];
+                                tag0[g]   <= fill_tag;
                                 valid0[g] <= 1'b1;
                             end
                             fill_sel[g] <= ~fill_sel[g];

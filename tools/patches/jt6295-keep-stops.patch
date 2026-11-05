@@ -1,0 +1,26 @@
+diff --git a/hdl/jt6295_ctrl.v b/hdl/jt6295_ctrl.v
+index 11fc102..2514486 100644
+--- a/hdl/jt6295_ctrl.v
++++ b/hdl/jt6295_ctrl.v
+@@ -101,9 +101,19 @@ always @(posedge clk) begin
+             else if( din[7] ) begin // channel start
+                 phrase <= din[6:0];
+                 cmd    <= 1'b1; // wait for second byte
+-                stop   <= 4'd0;
++                stop   <= stop & busy; // a new START isn't cancelled by a stale bit
+             end else begin // stop data
+-                stop   <= din[6:3];
++                // A STOP waits for its channel's turn, up to a sample, and
++                // another write must not take it back (Kaneko16-Pocket,
++                // 2026-11-05). MAME's okim6295 stops at the write. As written
++                // upstream a second STOP replaced the first and a phrase byte
++                // cleared it. Great 1000 Miles Rally stops one voice without
++                // waiting (0xd1c2) and another 1,296 clocks later, so the first
++                // played on to the end of its phrase. A bit goes once its
++                // channel shows not busy (stop & busy, above, and at a phrase
++                // byte, as a bit left on an idle channel would cancel the START
++                // that follows if the two met at the channel's turn).
++                stop   <= ( cen4 ? stop & busy : stop ) | din[6:3];
+             end
+         end
+     end

@@ -1,0 +1,20 @@
+diff --git a/hdl/jt6295_ctrl.v b/hdl/jt6295_ctrl.v
+index 11fc102..70f5931 100644
+--- a/hdl/jt6295_ctrl.v
++++ b/hdl/jt6295_ctrl.v
+@@ -151,7 +151,14 @@ always @(posedge clk) begin
+             3: new_start[ 7: 0] <= rom_data;
+             4: new_stop [17:16] <= rom_data[1:0];
+             5: new_stop [15: 8] <= rom_data;
+-            6: begin
++            // The channel is started only once the end address's last byte
++            // is in (World-Rally-Pocket, 2026-10-21). As written upstream,
++            // `start` went up on the first clock of this state, while
++            // rom_data still held the byte before, and a channel whose turn
++            // came before the ROM answered took that byte as its end's low
++            // byte: World Rally's phrase 02 (end 02c7f) ended at 02c2c, 166
++            // samples short. The longer the ROM takes, the likelier.
++            6: if( !wrom && rom_ok ) begin
+                 start       <= ch;
+                 start_addr  <= new_start;
+                 stop_addr   <= {new_stop[17:8], rom_data} ;

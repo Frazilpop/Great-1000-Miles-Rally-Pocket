@@ -154,6 +154,29 @@ The simulation harness takes the same file (`tb_gtmr ... --inputs
 build/mame/plan.txt`), and its stats.csv shows the longest bus cycle in each
 frame and its address.
 
+### The OKIs, voice by voice
+
+```sh
+tools/pocket/mame_oracle.sh tools/mame_gtmr_oki.lua gtmr \
+    OKI_OUT=build/mame/oki/race.txt OKI_FRAMES=4000 OKI_PLAN=$PWD/plan.txt
+python3 -I tools/pocket/oki_model.py build/pocket/gtmr.rom build/mame/oki/race.txt 0 4000 \
+    build/mame/oki/race.mchan build/mame/oki/race.mev
+sim/sound/build_gtmr_oki.sh
+mkdir -p build/oki_run && cd build/oki_run
+../obj_gtmr_oki/tb_gtmr_oki ../pocket/gtmr.rom ../mame/oki/race.txt 0 4000 o.chan o.ev
+python3 -I ../../tools/pocket/match_oki_channels.py o.chan o.ev ../mame/oki/race.mchan ../mame/oki/race.mev
+```
+
+`mame_gtmr_oki.lua` logs the game's writes to the OKIs and their banks (the
+plan file is optional, in the format of the section above). `oki_model.py` is
+MAME's okim6295 played from that log, one chip (0 or 1), checked against MAME's
+`-wavwrite`. `tb_gtmr_oki` plays the same writes through jt6295, the board's
+bank map and `kaneko_tilerom`, with the set's samples, and `--lat MIN MAX` sets
+the SDRAM's latency. `match_oki_channels.py` says, for each phrase, whether it
+played the addresses and the end the table gives and how many samples each
+played, then compares the voices value for value. `oki_phase_log.py` makes a log
+that starts phrases at every phase, for what the game's own traffic rarely hits.
+
 ## Reading the program
 
 ```sh

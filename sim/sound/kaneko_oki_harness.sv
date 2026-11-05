@@ -126,6 +126,7 @@ module kaneko_oki_harness #(
         .ss(ss),
         .wrn(~oki_we), .din(oki_din), .dout(oki_dout),
         .rom_addr(rom_addr), .rom_data(rom_data), .rom_ok(rom_ok),
-        .sound(oki_snd), .sample()
+        .sound(oki_snd), .sample(),
+        .ss_scan(1'b0), .ss_gsh(1'b0), .ss_gi(1'b0), .ss_go(), .ss_quiet(), .ss_phase()
     );
 endmodule

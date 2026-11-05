@@ -37,7 +37,17 @@ module kaneko_gtmr_oki #(parameter int unsigned SDR_AW = 25) (
     output wire signed [11:0] snd0,
     output wire signed [11:0] snd1,
     output wire signed [11:0] snd2,
-    output wire signed [11:0] snd3
+    output wire signed [11:0] snd3,
+
+    // The chip's output, and its save-state chain (jt6295-state.patch)
+    output wire signed [13:0] sound,
+    output wire        sample,
+    input  wire        ss_scan,
+    input  wire        ss_gsh,
+    input  wire        ss_gi,
+    output wire        ss_go,
+    output wire        ss_quiet,
+    output wire        ss_phase
 );
     localparam [SDR_AW:1] W_OKI1 = SDR_AW'(25'h0800000);    // byte 0x1000000
     localparam [SDR_AW:1] W_OKI2 = SDR_AW'(25'h0880000);    // byte 0x1100000
@@ -65,7 +75,9 @@ module kaneko_gtmr_oki #(parameter int unsigned SDR_AW = 25) (
         .rst(rst), .clk(clk), .cen(cen), .ss(1'b0),
         .wrn(~we), .din(din), .dout(dout),
         .rom_addr(a), .rom_data(d), .rom_ok(ok),
-        .sound(), .sample()
+        .sound(sound), .sample(sample),
+        .ss_scan(ss_scan), .ss_gsh(ss_gsh), .ss_gi(ss_gi), .ss_go(ss_go),
+        .ss_quiet(ss_quiet), .ss_phase(ss_phase)
     );
 
     assign slot       = u_oki.cen_sr4;

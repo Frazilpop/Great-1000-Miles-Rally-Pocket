@@ -59,10 +59,12 @@ done
 # jt6295 as upstream has it loses a STOP the game follows up at once, or that
 # another write lands on, stops a phrase a nibble early and can take the phrase
 # header's last byte before the ROM has brought it: the core would ship them
-# all. Each patch must reverse cleanly, i.e. be in place.
-for p in "$repo"/tools/patches/jt6295-*.patch; do
-    git -C "$repo/third_party/jt6295" apply --reverse --check "$p" 2>/dev/null || {
-        echo "build.sh: $(basename "$p") is not applied to third_party/jt6295 (run tools/bootstrap.sh)" >&2; exit 1; }
+# all. Its save-state chain and fx68k's save-state port are patches too. Each
+# clone's whole stack must be in place.
+for n in jt6295 fx68k; do
+    rc=0; "$repo/tools/patch_stack.sh" "$n" || rc=$?
+    [ $rc -ne 1 ] || {
+        echo "build.sh: tools/patches/$n-*.patch are not all applied to third_party/$n (run tools/bootstrap.sh)" >&2; exit 1; }
 done
 
 # ------------------------------------------------------------ one at a time

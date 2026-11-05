@@ -1,0 +1,285 @@
+diff --git a/hdl/fx68k.sv b/hdl/fx68k.sv
+index 59d6393..27c6ddc 100644
+--- a/hdl/fx68k.sv
++++ b/hdl/fx68k.sv
+@@ -159,7 +159,27 @@ module fx68k(
+ 	input BRn, BGACKn,
+ 	input IPL0n, input IPL1n, input IPL2n,
+ 	input [15:0] iEdb, output [15:0] oEdb,
+-	output [23:1] eab
++	output [23:1] eab,
++
++	// Save states. ssPark stops the
++	// sequencer at the next instruction boundary: the first microword of an
++	// instruction (or of the exception taken there) latched, its T4 done and
++	// its T1 not begun, so the instruction before is complete (STOP waits
++	// by dispatching itself again and again, so it is taken there too).
++	// ssParkDisp (a load only) stops it one
++	// microword before a boundary, at the dispatch, so the decision taken
++	// there can be put back. The register file has a port; SR, the
++	// exception latches and the clock-phase state are read and can be loaded.
++	input ssPark, input ssParkDisp,
++	output ssAtStart, output ssAtDisp, output ssBusIdle,
++	output [9:0] ssUaddr,
++	input [4:0] ssRegA, output [31:0] ssRegQ, input ssRegWe, input [31:0] ssRegD,
++	output [31:0] ssPc, output [15:0] ssSr,
++	output [15:0] ssMisc, output [15:0] ssGrpDisp, output [15:0] ssClk,
++	input ssSrWe, input [15:0] ssSrD,
++	input ssMiscWe, input [15:0] ssMiscD,
++	input ssGrpWe, input [15:0] ssGrpD,
++	input ssClkWe, input [15:0] ssClkD
+ 	);
+ 	
+ 	// wire clock = Clks.clk;
+@@ -174,7 +194,8 @@ module fx68k(
+ 	wire wClk;
+ 	
+ 	// Internal sub clocks T1-T4
+-	enum int unsigned { T0 = 0, T1, T2, T3, T4} tState;
++	typedef enum int unsigned { T0 = 0, T1, T2, T3, T4} tstate_t;
++	tstate_t tState;
+ 	wire enT1 = Clks.enPhi1 & (tState == T4) & ~wClk;
+ 	wire enT2 = Clks.enPhi2 & (tState == T1);
+ 	wire enT3 = Clks.enPhi1 & (tState == T2);
+@@ -185,6 +206,8 @@ module fx68k(
+ 	always_ff @( posedge Clks.clk) begin
+ 		if( Clks.pwrUp)
+ 			tState <= T0;
++		else if( ssClkWe)
++			tState <= tstate_t'( ssClkD[6:4]);
+ 		else begin
+ 		case( tState)
+ 		T0: if( Clks.enPhi2) tState <= T4;
+@@ -351,16 +374,20 @@ module fx68k(
+ 
+ 	uaddrDecode uaddrDecode( .opcode( Ir), .a1, .a2, .a3, .isPriv, .isIllegal, .isLineA, .isLineF, .lineBmap());
+ 
++	wire [10:0] ssGrpNow;				// save states: the exception latches
++	wire ssWait;						// save states: a park holds the sequencer
+ 	sequencer sequencer( .Clks, .enT3, .microLatch, .Ird,
+ 		.A0Err, .excRst, .BerrA, .busAddrErr, .Spuria, .Avia,
+ 		.Tpend, .intPend, .isIllegal, .isPriv, .isLineA, .isLineF,
+ 		.nma, .a1, .a2, .a3, .tvn,
+-		.psw, .prenEmpty, .au05z, .dcr4, .ze, .alue01( alue[1:0]), .i11( Irc[ 11]) );
++		.psw, .prenEmpty, .au05z, .dcr4, .ze, .alue01( alue[1:0]), .i11( Irc[ 11]),
++		.ssGrpQ( ssGrpNow), .ssGrpWe, .ssGrpD( ssGrpD[10:0]) );
+ 
+ 	excUnit excUnit( .Clks, .Nanod, .Irdecod, .enT1, .enT2, .enT3, .enT4,
+ 		.Ird, .ftu, .iEdb, .pswS,
+ 		.prenEmpty, .au05z, .dcr4, .ze, .AblOut( Abl), .eab, .aob0, .Irc, .oEdb,
+-		.alue, .ccr);
++		.alue, .ccr,
++		.ssRegA, .ssRegQ, .ssRegWe, .ssRegD, .ssPc, .ssCcrWe( ssSrWe), .ssCcrD( ssSrD[4:0]));
+ 
+ 	nDecoder3 nDecoder( .Clks, .Nanod, .Irdecod, .enT2, .enT4, .microLatch, .nanoLatch);
+ 	
+@@ -370,7 +397,7 @@ module fx68k(
+ 		.aob0, .isWrite( Nanod.isWrite), .isRmc( Nanod.isRmc), .isByte( busIsByte), .busAvail,
+ 		.bciWrite, .addrOe, .bgBlock, .waitBusCycle, .busStarting, .busAddrErr,
+ 		.rDtack, .BeDebounced, .Vpai,
+-		.ASn, .LDSn, .UDSn, .eRWn);
++		.ASn, .LDSn, .UDSn, .eRWn, .ssIdle( ssBusIdle), .ssHold( ssWait));
+ 		
+ 	busArbiter busArbiter( .Clks, .BRi, .BgackI, .Halti, .bgBlock, .busAvail, .BGn);
+ 		
+@@ -442,6 +469,10 @@ module fx68k(
+ 					intPend <= 1'b0;
+ 			end			
+ 		end
++		if( ssMiscWe) begin
++			intPend <= ssMiscD[1];
++			prevNmi <= ssMiscD[0];
++		end
+ 		
+ 		if( Clks.extReset) begin
+ 			inl <= '1;
+@@ -451,6 +482,8 @@ module fx68k(
+ 			updIll <= microLatch[0];		// Update on any IRC->IR
+ 		else if( enT1 & updIll)
+ 			inl <= iIpl;					// Timing is correct.
++		if( ssMiscWe)
++			inl <= ssMiscD[4:2];
+ 			
+ 		// Spurious interrupt, BERR on Interrupt Ack.
+ 		// Autovector interrupt. VPA on IACK.
+@@ -463,7 +496,35 @@ module fx68k(
+ 	end
+ 		
+ 	assign enErrClk = iAddrErr | iBusErr;
+-	assign wClk = waitBusCycle | ~BeI | iAddrErr | Err6591;
++
++	// Save states: what is read
++	assign ssSr = psw;
++	assign ssMisc = { ssGrpNow, inl, intPend, prevNmi };
++	assign ssGrpDisp = { 5'd0, ssGrpAtDisp };
++	assign ssClk = { 7'd0, Tpend, rVma, tState[2:0], eCntr };
++	// Save states: the parks (above). A dispatch is a microword that takes
++	// its next address from A1 (or the group 1 exception it finds); ssStart
++	// is set at its T1 and marks the microword latched after it as an
++	// instruction's first until the next T1.
++	wire ssDispatch = ~microLatch[1] & (microLatch[3:2] == 2'b01);
++	reg ssStart;
++	reg [10:0] ssGrpAtDisp;
++	always_ff @( posedge Clks.clk) begin
++		if( Clks.extReset)
++			ssStart <= 1'b0;
++		else if( enT1) begin
++			ssStart <= ssDispatch & ~A0Err;
++			if( ssDispatch & ~A0Err)
++				ssGrpAtDisp <= ssGrpNow;			// the exception latches this dispatch decided on
++		end
++	end
++	wire ssT4 = (tState == T4) | (tState == T0);
++	assign ssAtStart = ssStart & ssT4;
++	assign ssAtDisp = ssDispatch & ~A0Err & ssT4;
++	assign ssUaddr = microAddr;
++	assign ssWait = (ssPark & ssStart) | (ssParkDisp & ssDispatch & ~A0Err);
++
++	assign wClk = waitBusCycle | ~BeI | iAddrErr | Err6591 | ssWait;
+ 	
+ 	// E clock and counter, VMA
+ 	reg [3:0] eCntr;
+@@ -501,6 +562,12 @@ module fx68k(
+ 			rVma <= 1'b0;
+ 		else if( Clks.enPhi1 & eCntr == '0)
+ 			rVma <= 1'b1;
++
++		if( ssClkWe) begin
++			eCntr <= ssClkD[3:0];
++			E <= ssClkD[3:0] >= 4'd6;
++			rVma <= ssClkD[7];
++		end
+ 	end
+ 		
+ 	always_ff @( posedge Clks.clk) begin
+@@ -566,6 +633,10 @@ module fx68k(
+ 			{pswT, pswS, pswI } <= '0;
+ 			irdToCcr_t4 <= '0;
+ 		end
++
++		else if( ssSrWe) begin
++			{ pswT, pswS, pswI } <= { ssSrD[15], ssSrD[13], ssSrD[10:8]};
++		end
+ 		
+ 		else if( enT4) begin
+ 			irdToCcr_t4 <= Irdecod.toCcr;
+@@ -592,6 +663,8 @@ module fx68k(
+ 			end
+ 				
+ 		end
++		if( ssClkWe)
++			Tpend <= ssClkD[8];
+ 	end
+ 		
+ 	// FTU
+@@ -1164,7 +1237,10 @@ module excUnit( input s_clks Clks,
+ 	output [15:0] AblOut,
+ 	output logic [15:0] Irc,
+ 	output logic [15:0] oEdb,
+-	output logic [23:1] eab);
++	output logic [23:1] eab,
++	// save states: the register file's port, the PC, the CCR's load
++	input [4:0] ssRegA, output [31:0] ssRegQ, input ssRegWe, input [31:0] ssRegD,
++	output [31:0] ssPc, input ssCcrWe, input [4:0] ssCcrD);
+ 
+ localparam REG_USP = 15;
+ localparam REG_SSP = 16;
+@@ -1547,7 +1623,13 @@ localparam REG_DT = 17;
+ 				regs68H[ actualRy] <= Nanod.dbh2ryh ? Dbh : Abh;
+ 				
+ 		end	
++		if( ssRegWe) begin
++			regs68H[ ssRegA] <= ssRegD[31:16];
++			regs68L[ ssRegA] <= ssRegD[15:0];
++		end
+ 	end
++	assign ssRegQ = { regs68H[ ssRegA], regs68L[ ssRegA]};
++	assign ssPc = { PcH, PcL};
+ 		
+ 	// PC & AT
+ 	reg dbl2Pcl, dbh2Pch, abh2Pch, abl2Pcl;
+@@ -1688,7 +1770,7 @@ localparam REG_DT = 17;
+ 		.ftu2Ccr( Nanod.ftu2Ccr),
+ 		.alub, .ftu, .alueClkEn, .alue,
+ 		.aluDataCtrl( Nanod.aluDctrl), .iDataBus( Dbd), .iAddrBus(Abd),
+-		.ze, .aluOut, .ccr);
++		.ze, .aluOut, .ccr, .ssCcrWe, .ssCcrD);
+ 
+ endmodule
+ 
+@@ -1947,7 +2029,9 @@ module sequencer( input s_clks Clks, input enT3,
+ 	input [15:0] Ird,
+ 	input [UADDR_WIDTH-1:0] a1, a2, a3,
+ 	output logic [3:0] tvn,
+-	output logic [UADDR_WIDTH-1:0] nma);
++	output logic [UADDR_WIDTH-1:0] nma,
++	// save states: the group 1 and group 0 exception latches
++	output [10:0] ssGrpQ, input ssGrpWe, input [10:0] ssGrpD);
+ 	
+ 	logic [UADDR_WIDTH-1:0] uNma;
+ 	logic [UADDR_WIDTH-1:0] grp1Nma;	
+@@ -2131,7 +2215,13 @@ module sequencer( input s_clks Clks, input enT3,
+ 			rLineF <= isLineF;
+ 			rPriv <= isPriv & !psw[ SF];
+ 		end
++
++		if( ssGrpWe)
++			{ rTrace, rInterrupt, rIllegal, rPriv, rLineA, rLineF,
++			  rExcRst, rExcBusErr, rExcAdrErr, rSpurious, rAutovec } <= ssGrpD;
+ 	end
++	assign ssGrpQ = { rTrace, rInterrupt, rIllegal, rPriv, rLineA, rLineF,
++	                  rExcRst, rExcBusErr, rExcAdrErr, rSpurious, rAutovec };
+ 
+ 	// exception priority
+ 	always_comb begin
+@@ -2275,7 +2365,9 @@ module busControl( input s_clks Clks, input enT1, input enT4,
+ 		output bciWrite,			// Used for SSW on bus/addr error
+ 		
+ 		input rDtack, BeDebounced, Vpai,
+-		output ASn, output LDSn, output UDSn, eRWn);
++		output ASn, output LDSn, output UDSn, eRWn,
++		output ssIdle,			// save states: no bus cycle running or pending
++		input ssHold);			// save states: parked, so the latched microword's bus cycle waits for its T1
+ 
+ 	reg rAS, rLDS, rUDS, rRWn;
+ 	assign ASn = rAS;
+@@ -2327,11 +2419,15 @@ module busControl( input s_clks Clks, input enT1, input enT4,
+ 	// Idle phase of RMC bus cycle. Might be better to just add a new state
+ 	wire rmcIdle = (busPhase == SIDLE) & ~ASn & isRmcReg;
+ 		
+-	assign canStart = (busAvail | rmcIdle) & (bcPend | permStart) & !busRetry & !bcReset;
++	// (permStart is the latched microword's, whose bus cycle starts at the phi1
++	// that is its T1; while a save's park holds the sequencer before that T1,
++	// it must not start on its own, again and again)
++	assign canStart = (busAvail | rmcIdle) & (bcPend | (permStart & ~ssHold)) & !busRetry & !bcReset;
+ 		
+ 	wire busEnding = (next == SIDLE) | (next == S0);
+ 	
+ 	assign busStarting = (busPhase == S0);
++	assign ssIdle = (busPhase == SIDLE) & ~bcPend & rAS;
+ 		
+ 	// term signal (DTACK, BERR, VPA, adress error)
+ 	assign busEnd = ~rDtack | iStop;
+diff --git a/hdl/fx68kAlu.sv b/hdl/fx68kAlu.sv
+index 189f6ac..9cee987 100644
+--- a/hdl/fx68kAlu.sv
++++ b/hdl/fx68kAlu.sv
+@@ -39,7 +39,8 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
+ 	output ze,
+ 	output reg [15:0] alue,
+ 	output reg [7:0] ccr,
+-	output [15:0] aluOut);
++	output [15:0] aluOut,
++	input ssCcrWe, input [4:0] ssCcrD);	// save states: the CCR loaded
+ 
+ 
+ `define ALU_ROW_01		16'h0002
+@@ -442,6 +443,8 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
+ 		// Might be possible to update on T4 (but not after T0) from partial result registered on T3, it will increase performance!
+ 		if( pwrUp)
+ 			pswCcr <= '0;
++		else if( ssCcrWe)
++			pswCcr <= ssCcrD;
+ 		else if( enT3 & ftu2Ccr)
+ 			pswCcr <= ftu[4:0];	
+ 		else if( enT3 &	~noCcrEn & (finish | init))

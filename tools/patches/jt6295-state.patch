@@ -1,0 +1,477 @@
+diff --git a/hdl/jt6295.v b/hdl/jt6295.v
+--- a/hdl/jt6295.v
++++ b/hdl/jt6295.v
+@@ -31,9 +31,23 @@
+     input                  rom_ok,
+     // Sound output
+     output signed [13:0]   sound,
+-    output                 sample   // 48 kHz for a 1.000 MHz cen
++    output                 sample,  // 48 kHz for a 1.000 MHz cen
++    // Save states (Kaneko16-Pocket, 2026-11-05). Hold cen and every cen_sr* stops.
++    // At ss_phase (the dead part of the sample period) with ss_quiet (the
++    // control machine idle), raise ss_scan: then the chip's 505 bits of state
++    // form one chain, ss_gi to ss_go, a move on each ss_gsh. 505 moves with
++    // ss_go fed back to ss_gi leave it as it was; 505 moves of a saved stream
++    // put that state in.
++    input                  ss_scan,
++    input                  ss_gsh,
++    input                  ss_gi,
++    output                 ss_go,
++    output                 ss_quiet,
++    output                 ss_phase
+ );
+ 
++wire ss_c2s, ss_s2r, ss_r2a, ss_a2c;
++
+ parameter INTERPOL=0; // 0 = no interpolator
+                       // 1 = 4x upsampling, LPF at 0.25*pi
+                       // 2 = 4x upsampling, LPF at 0.5*pi (use if there's already)
+@@ -69,7 +83,8 @@
+     .cen_sr4    ( cen_sr4   ),
+     .cen_sr4b   ( cen_sr4b  ),
+     .cen_sr32   ( cen_sr32  ),
+-    .cen_48k    ( cen_48k   )
++    .cen_48k    ( cen_48k   ),
++    .ss_phase   ( ss_phase  )
+ );
+ 
+ // ROM interface
+@@ -90,7 +105,11 @@
+     // ROM interface
+     .rom_addr   ( rom_addr      ),
+     .rom_data   ( rom_data      ),
+-    .rom_ok     ( rom_ok        )
++    .rom_ok     ( rom_ok        ),
++    .ss_scan    ( ss_scan       ),
++    .ss_gsh     ( ss_gsh        ),
++    .ss_gi      ( ss_s2r        ),
++    .ss_go      ( ss_r2a        )
+ );
+ 
+ // CPU interface
+@@ -117,7 +136,12 @@
+     .stop       ( stop          ),
+     .busy       ( busy          ),
+     .ack        ( ack           ),
+-    .zero       ( zero          )
++    .zero       ( zero          ),
++    .ss_scan    ( ss_scan       ),
++    .ss_gsh     ( ss_gsh        ),
++    .ss_gi      ( ss_gi         ),
++    .ss_go      ( ss_c2s        ),
++    .ss_quiet   ( ss_quiet      )
+ );
+ 
+ jt6295_serial u_serial(
+@@ -140,7 +164,11 @@
+     // serialized data
+     .pipe_en    ( pipe_en       ),
+     .pipe_att   ( pipe_att      ),
+-    .pipe_data  ( pipe_data     )
++    .pipe_data  ( pipe_data     ),
++    .ss_scan    ( ss_scan       ),
++    .ss_gsh     ( ss_gsh        ),
++    .ss_gi      ( ss_c2s        ),
++    .ss_go      ( ss_s2r        )
+ );
+ 
+ jt6295_adpcm u_adpcm(
+@@ -151,7 +179,11 @@
+     .en         ( pipe_en       ),
+     .att        ( pipe_att      ),
+     .data       ( pipe_data     ),
+-    .sound      ( pipe_snd      )
++    .sound      ( pipe_snd      ),
++    .ss_scan    ( ss_scan       ),
++    .ss_gsh     ( ss_gsh        ),
++    .ss_gi      ( ss_r2a        ),
++    .ss_go      ( ss_a2c        )
+ );
+ 
+ jt6295_acc #(.INTERPOL(INTERPOL)) u_acc(
+@@ -162,7 +194,11 @@
+     // serialized data
+     .sound_in   ( pipe_snd      ),
+     .sound_out  ( sound         ),
+-    .sample     ( cen_eff       )
++    .sample     ( cen_eff       ),
++    .ss_scan    ( ss_scan       ),
++    .ss_gsh     ( ss_gsh        ),
++    .ss_gi      ( ss_a2c        ),
++    .ss_go      ( ss_go         )
+ );
+ 
+ `ifdef SIMULATION
+diff --git a/hdl/jt6295_acc.v b/hdl/jt6295_acc.v
+--- a/hdl/jt6295_acc.v
++++ b/hdl/jt6295_acc.v
+@@ -25,7 +25,13 @@
+     input                cen4,
+     input  signed [11:0] sound_in,
+     output signed [13:0] sound_out,
+-    output               sample
++    output               sample,
++    // Save states (Kaneko16-Pocket, 2026-11-05): acc, then sum, along the chain on
++    // ss_gsh in ss_scan.
++    input                ss_scan,
++    input                ss_gsh,
++    input                ss_gi,
++    output               ss_go
+ );
+ /* verilator lint_off WIDTH */
+ // Note that the interpolators remove aliasing much more
+@@ -37,9 +43,13 @@
+ 
+ reg signed [13:0] acc, sum;
+ 
++assign ss_go = sum[0];
++
+ always @(posedge clk, posedge rst) begin
+     if( rst ) begin
+         acc <= 14'd0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) acc <= { ss_gi, acc[13:1] };
+     end else if(cen4) begin
+         acc <= cen ? sound_in : acc + sound_in;
+     end
+@@ -48,6 +58,8 @@
+ always @(posedge clk, posedge rst) begin
+     if( rst ) begin
+         sum <= 14'd0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) sum <= { acc[0], sum[13:1] };
+     end else if(cen) begin
+         sum <= acc;
+     end
+diff --git a/hdl/jt6295_adpcm.v b/hdl/jt6295_adpcm.v
+--- a/hdl/jt6295_adpcm.v
++++ b/hdl/jt6295_adpcm.v
+@@ -23,7 +23,14 @@
+     input                    en,
+     input             [ 3:0] att,
+     input             [ 3:0] data,
+-    output reg signed [11:0] sound
++    output reg signed [11:0] sound,
++    // Save states (Kaneko16-Pocket, 2026-11-05): the pipeline's stages, then the
++    // enable, attenuation and sound rotors, then the output stage, in that
++    // order along the chain, moved on ss_gsh in ss_scan.
++    input                    ss_scan,
++    input                    ss_gsh,
++    input                    ss_gi,
++    output                   ss_go
+ );
+ 
+ 
+@@ -37,6 +44,12 @@
+ reg        sign_II, sign_III, sign_IV, sign_V;
+ reg [11:0] dn_II, qn_II, dn_III, qn_III, dn_IV, qn_IV, qn_V;
+ 
++wire [124:0] ss_st = { idx_inc_II, delta_idx_I, delta_idx_II, delta_idx_III,
++                       delta_idx_IV, factor_II, factor_III, factor_IV,
++                       sign_II, sign_III, sign_IV, sign_V,
++                       dn_II, qn_II, dn_III, qn_III, dn_IV, qn_IV, qn_V };
++wire ss_en_go, ss_att_go, ss_snd_go;
++
+ always @(posedge clk, posedge rst ) begin
+     if(rst) begin
+         idx_inc_II    <= 6'd0;
+@@ -56,6 +69,12 @@
+         dn_IV   <= 12'd0;
+         qn_IV   <= 12'd0;
+         qn_V    <= 12'd0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) { idx_inc_II, delta_idx_I, delta_idx_II, delta_idx_III,
++                       delta_idx_IV, factor_II, factor_III, factor_IV,
++                       sign_II, sign_III, sign_IV, sign_V,
++                       dn_II, qn_II, dn_III, qn_III, dn_IV, qn_IV, qn_V }
++                     <= { ss_gi, ss_st[124:1] };
+     end else if(cen) begin
+         // I
+         case( data[1:0] )
+@@ -98,7 +117,11 @@
+     .clk    ( clk       ),
+     .clk_en ( cen       ),
+     .din    ( en        ),
+-    .drop   ( en_V      )
++    .drop   ( en_V      ),
++    .ss_scan( ss_scan   ),
++    .ss_gsh ( ss_gsh    ),
++    .ss_gi  ( ss_st[0]  ),
++    .ss_go  ( ss_en_go  )
+ );
+ 
+ wire [3:0] att_V;
+@@ -109,7 +132,11 @@
+     .clk    ( clk       ),
+     .clk_en ( cen       ),
+     .din    ( att       ),
+-    .drop   ( att_V     )
++    .drop   ( att_V     ),
++    .ss_scan( ss_scan   ),
++    .ss_gsh ( ss_gsh    ),
++    .ss_gi  ( ss_en_go  ),
++    .ss_go  ( ss_att_go )
+ );
+ 
+ 
+@@ -119,6 +146,8 @@
+ reg  signed [ 6:0] gain_lut[0:15];
+ reg  signed [ 6:0] gain_VI; // leave the MSB for the sign
+ reg                ov_V;
++wire        [30:0] ss_out = { snd_VI, gain_VI, sound };
++assign ss_go = ss_out[0];
+ wire signed [16:0] mul_VI = snd_VI * gain_VI; // multipliers are abundant
+     // in the FPGA, so I just use one.
+ 
+@@ -135,6 +164,8 @@
+         snd_VI  <= 12'd0;
+         gain_VI <= 7'd0;
+         sound   <= 12'd0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) { snd_VI, gain_VI, sound } <= { ss_snd_go, ss_out[30:1] };
+     end else if(cen) begin
+         snd_VI  <= snd_V;
+         gain_VI <= gain_lut[att_V];
+@@ -147,7 +178,11 @@
+     .clk    ( clk       ),
+     .clk_en ( cen       ),
+     .din    ( snd_V     ),
+-    .drop   ( snd_out   )
++    .drop   ( snd_out   ),
++    .ss_scan( ss_scan   ),
++    .ss_gsh ( ss_gsh    ),
++    .ss_gi  ( ss_att_go ),
++    .ss_go  ( ss_snd_go )
+ );
+ 
+ initial begin
+diff --git a/hdl/jt6295_ctrl.v b/hdl/jt6295_ctrl.v
+--- a/hdl/jt6295_ctrl.v
++++ b/hdl/jt6295_ctrl.v
+@@ -38,7 +38,16 @@
+     output reg [ 3:0]      stop,
+     input      [ 3:0]      busy,
+     input      [ 3:0]      ack,
+-    input                  zero
++    input                  zero,
++    // Save states (Kaneko16-Pocket, 2026-11-05): in ss_scan the state below moves one
++    // place along the chain on each ss_gsh and nothing else changes. The rest
++    // (st, push, pull, ch, new_att, new_start, new_stop, addr_lsb, wrom,
++    // last_wrn) is written before it is read once the machine is quiet.
++    input                  ss_scan,
++    input                  ss_gsh,
++    input                  ss_gi,
++    output                 ss_go,
++    output                 ss_quiet
+ );
+ 
+ reg  last_wrn;
+@@ -56,6 +65,9 @@
+ 
+ reg stop_clr;
+ 
++wire [11:0] ss_v1;  // cmd, stop, phrase
++wire [43:0] ss_v2;  // start_addr, stop_addr, att, start
++
+ `ifdef JT6295_DUMP
+ integer fdump;
+ integer ticks=0;
+@@ -86,6 +98,8 @@
+         pull     <= 1'b1;
+         phrase   <= 7'd0;
+         new_att  <= 0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) { cmd, stop, phrase } <= { ss_gi, ss_v1[11:1] };
+     end else begin
+         if( cen4 ) begin
+             stop <= stop & busy;
+@@ -125,6 +139,10 @@
+ reg        wrom;
+ 
+ assign rom_addr = { phrase, addr_lsb };
++assign ss_v1    = { cmd, stop, phrase };
++assign ss_v2    = { start_addr, stop_addr, att, start };
++assign ss_go    = ss_v2[0];
++assign ss_quiet = st==3'd7 && !pull && !push;
+ 
+ // Request phrase address
+ always @(posedge clk) begin
+@@ -136,6 +154,8 @@
+         start      <= 0;
+         push       <= 0;
+         addr_lsb   <= 0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) { start_addr, stop_addr, att, start } <= { ss_v1[0], ss_v2[43:1] };
+     end else begin
+         if( st!=7 ) begin
+             wrom <= 0;
+diff --git a/hdl/jt6295_rom.v b/hdl/jt6295_rom.v
+--- a/hdl/jt6295_rom.v
++++ b/hdl/jt6295_rom.v
+@@ -41,9 +41,19 @@
+     // ROM interface
+     output reg [17:0] rom_addr,
+     input      [ 7:0] rom_data,
+-    input             rom_ok
++    input             rom_ok,
++    // Save states (Kaneko16-Pocket, 2026-11-05): adpcm_dout is the one ROM read in
++    // flight at the dead phase; it moves along the chain on ss_gsh. st, the
++    // ROM address and the control read settle from the counter and the
++    // control machine by themselves.
++    input             ss_scan,
++    input             ss_gsh,
++    input             ss_gi,
++    output            ss_go
+ );
+ 
++assign ss_go = adpcm_dout[0];
++
+ reg [7:0] st;
+ reg [1:0] wait2;
+ 
+@@ -76,6 +86,7 @@
+                 wait2 <= {wait2[0],1'b1};
+         end
+     endcase
++    if( ss_scan && ss_gsh ) adpcm_dout <= { ss_gi, adpcm_dout[7:1] };
+ end
+ 
+ endmodule
+\ No newline at end of file
+diff --git a/hdl/jt6295_serial.v b/hdl/jt6295_serial.v
+--- a/hdl/jt6295_serial.v
++++ b/hdl/jt6295_serial.v
+@@ -36,9 +36,18 @@
+     // serialized data
+     output reg          pipe_en,
+     output reg [ 3:0]   pipe_att,
+-    output reg [ 3:0]   pipe_data
++    output reg [ 3:0]   pipe_data,
++    // Save states (Kaneko16-Pocket, 2026-11-05): ch, busy, ack, the pipe and the
++    // channel rotor, in that order along the chain, moved on ss_gsh in ss_scan.
++    input               ss_scan,
++    input               ss_gsh,
++    input               ss_gi,
++    output              ss_go
+ );
+ 
++wire [7:0] ss_ba;   // busy, ack
++wire [8:0] ss_pp;   // pipe_data, pipe_en, pipe_att
++
+ localparam CSRW = 18+19+4+1;
+ 
+ reg  [ 3:0] ch;
+@@ -53,7 +62,9 @@
+ always @(posedge clk, posedge rst) begin
+     if(rst)
+         ch <= 4'b1;
+-    else begin
++    else if( ss_scan ) begin
++        if( ss_gsh ) ch <= { ss_gi, ch[3:1] };
++    end else begin
+         // if(cen4) ch <= { ch[0], ch[3:1]  };
+         if(cen4) ch <= { ch[2:0], ch[3]  };
+     end
+@@ -85,6 +96,8 @@
+ always @(posedge clk, posedge rst ) begin
+     if( rst ) begin
+         busy <= 4'd0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) { busy, ack } <= { ch[0], ss_ba[7:1] };
+     end else begin
+         if( cen4 ) case( ch )
+             4'b0001: busy[0] <= busy_in;
+@@ -115,6 +128,8 @@
+ end
+ 
+ assign zero     = ch[0];
++assign ss_ba    = { busy, ack };
++assign ss_pp    = { pipe_data, pipe_en, pipe_att };
+ assign update   = up_start | up_stop;
+ assign cont     = busy_out & ~over;
+ assign cnt_next = cont      ? cnt+19'd1 : cnt;
+@@ -139,7 +154,11 @@
+     .clk    ( clk       ),
+     .clk_en ( cen4      ),
+     .din    ( csr_in    ),
+-    .drop   ( csr_out   )
++    .drop   ( csr_out   ),
++    .ss_scan( ss_scan   ),
++    .ss_gsh ( ss_gsh    ),
++    .ss_gi  ( ss_pp[0]  ),
++    .ss_go  ( ss_go     )
+ );
+ 
+ // Channel data is latched for a clock cycle to wait for ROM data
+@@ -149,6 +168,8 @@
+         pipe_data<= 4'd0;
+         pipe_en  <= 1'b0;
+         pipe_att <= 4'd0;
++    end else if( ss_scan ) begin
++        if( ss_gsh ) { pipe_data, pipe_en, pipe_att } <= { ss_ba[0], ss_pp[8:1] };
+     end else if(cen4) begin
+         // data
+         pipe_data <= !cnt[0] ? rom_data[7:4] : rom_data[3:0];
+diff --git a/hdl/jt6295_sh_rst.v b/hdl/jt6295_sh_rst.v
+--- a/hdl/jt6295_sh_rst.v
++++ b/hdl/jt6295_sh_rst.v
+@@ -25,9 +25,23 @@
+ 	input 					clk,
+ 	input					clk_en /* synthesis direct_enable */,
+ 	input		[WIDTH-1:0]	din,
+-   	output		[WIDTH-1:0]	drop
++   	output		[WIDTH-1:0]	drop,
++	// Save-state chain (Kaneko16-Pocket, 2026-11-05). In ss_scan the columns are one
++	// chain: ss_gi into column 0's first stage, each column's last stage into
++	// the next one's first, the last column's at ss_go, a move on each ss_gsh.
++	// The chain enters at each column's input only, so the columns stay plain
++	// shift registers and Quartus can still keep them in RAM.
++	input					ss_scan,
++	input					ss_gsh,
++	input					ss_gi,
++	output					ss_go
+ );
+ 
++wire [WIDTH:0]   ss_link = { drop, ss_gi };
++wire [WIDTH-1:0] sh_in   = ss_scan ? ss_link[WIDTH-1:0] : din;
++wire             sh_en   = ss_scan ? ss_gsh : clk_en;
++assign ss_go = ss_link[WIDTH];
++
+ reg [STAGES-1:0] bits[WIDTH-1:0];
+ 
+ genvar i;
+@@ -44,8 +58,8 @@
+ 		always @(posedge clk, posedge rst) 
+ 			if( rst ) begin
+ 				bits[i] <= {STAGES{RSTVAL}};
+-			end else if(clk_en) begin
+-				bits[i] <= {bits[i][STAGES-2:0], din[i]};
++			end else if(sh_en) begin
++				bits[i] <= {bits[i][STAGES-2:0], sh_in[i]};
+ 			end
+ 		assign drop[i] = bits[i][STAGES-1];
+ 	end
+diff --git a/hdl/jt6295_timing.v b/hdl/jt6295_timing.v
+--- a/hdl/jt6295_timing.v
++++ b/hdl/jt6295_timing.v
+@@ -28,7 +28,10 @@
+     output reg  cen_sr4,  // 4x sample rate
+     output reg  cen_sr4b, // 4x sample rate, 180 shift
+     output reg  cen_sr32,
+-    output reg  cen_48k   // 48 kHz low pass filter
++    output reg  cen_48k,  // 48 kHz low pass filter
++    // Save states (Kaneko16-Pocket, 2026-11-05): the dead part of the sample period,
++    // where no slot runs and none of the cen_sr* has fired for a while.
++    output      ss_phase
+ );
+ 
+ localparam [7:0] N48=8'd6, D48=8'd125;
+@@ -37,6 +40,8 @@
+ reg  [5:0] cnt =6'd0;
+ wire [2:0] lim = ss ? 3'h3 : 3'h4;
+ 
++assign ss_phase = cnt==6'd32 && base==3'd2;
++
+ reg  [7:0] cnt48=0;
+ wire       over48 = cnt48>=D48;
+ 

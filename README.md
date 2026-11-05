@@ -61,9 +61,10 @@ or you can use a tool like Pocket Updater.
 | Start | start |
 
 The Pocket's own menu has the usual **Display Mode** and **Controls** entries.
-Under **Core Settings** there are three options:
+Under **Core Settings** there are four options:
 
 - **Test Mode** – the arcade cabinet's operator menu
+- **Hide speed lines** – turns off the streaks the game draws at high speed
 - **Reset Game**
 - **Diagnostic overlay** – probably best to ignore this
 

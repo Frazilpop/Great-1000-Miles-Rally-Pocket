@@ -86,6 +86,9 @@ module kaneko_gtmr #(
     // where they are. Video keeps running, so the picture holds.
     input  wire        pause,
 
+    // Keeps the game from drawing its speed lines (see "Speed lines" below).
+    input  wire        hide_speed_lines,
+
     // EEPROM backup
     input  wire [5:0]  nv_addr,
     input  wire [15:0] nv_din,
@@ -169,7 +172,7 @@ kaneko_video_timing u_timing
 );
 
 // ================================================================ 68000
-wire [15:0] oEdb, iEdb;
+wire [15:0] oEdb, iEdb, bus_iEdb;
 wire [23:1] eab;
 wire [2:0]  cpu_fc;
 wire [2:0]  cpu_ipl_n;
@@ -223,6 +226,36 @@ kaneko_irq #(.LINE_IRQ4(`GTMR_IRQ4_LINE), .LINE_IRQ3(`GTMR_IRQ3_LINE)) u_irq
     .ipl_n(cpu_ipl_n), .vpa_n(cpu_vpa_n), .iack(cpu_iack)
 );
 
+// ================================================================ speed lines
+// Once the car's speed word reaches 0xC00 the game draws streaks along the
+// road: thin lines from the object "OXspdlin" in gtmr, wider patches from
+// "OXspdobj" in the other sets. Each object starts them at one CMPI.W #$C00,D0
+// and ends them at another. Hiding them answers those two instructions'
+// immediate word with 0xFFFF: the speed never reaches it, so they never start,
+// and any already drawn are cleared by the routine's own exit.
+//
+// Program-space fetches only, so a ROM check reading the same address as data
+// still sees the ROM. The addresses are each set's own. The compare is
+// registered: the address settles at least one clock before the 68000 can take
+// the data.
+logic [23:1] spdl_a0, spdl_a1;
+always_comb
+    case (game)
+    3'd0:    begin spdl_a0 = 23'h09906 >> 1; spdl_a1 = 23'h09992 >> 1; end  // gtmr
+    3'd1:    begin spdl_a0 = 23'h10854 >> 1; spdl_a1 = 23'h109a2 >> 1; end  // gtmre
+    3'd2:    begin spdl_a0 = 23'h1085c >> 1; spdl_a1 = 23'h109aa >> 1; end  // gtmrusa
+    3'd3:    begin spdl_a0 = 23'h1dc90 >> 1; spdl_a1 = 23'h1ded6 >> 1; end  // gtmr2
+    3'd4:    begin spdl_a0 = 23'h1dcb4 >> 1; spdl_a1 = 23'h1defa >> 1; end  // gtmr2u
+    default: begin spdl_a0 = '1;             spdl_a1 = '1;             end
+    endcase
+
+logic spdl_hit;
+always_ff @(posedge clk)
+    spdl_hit <= hide_speed_lines && (cpu_fc[1:0] == 2'b10) &&
+                (eab == spdl_a0 || eab == spdl_a1);
+
+assign iEdb = spdl_hit ? 16'hffff : bus_iEdb;
+
 // ================================================================ bus
 wire        bus_rom_req;  wire [SDR_AW:1] bus_rom_addr;
 wire        bus_ram_req, bus_ram_we;
@@ -247,7 +280,7 @@ kaneko_gtmr_bus #(.SDR_AW(SDR_AW)) u_bus
 (
     .clk(clk), .rst(cpu_rst), .map2(map2),
     .eab(eab), .ASn(ASn), .LDSn(LDSn), .UDSn(UDSn), .eRWn(eRWn),
-    .oEdb(oEdb), .iEdb(iEdb), .DTACKn(DTACKn), .cpu_space(cpu_iack),
+    .oEdb(oEdb), .iEdb(bus_iEdb), .DTACKn(DTACKn), .cpu_space(cpu_iack),
 
     .rom_req(bus_rom_req), .rom_addr(bus_rom_addr),
     .rom_ack(rom_ack[4] & ~mcu_busy), .rom_dout(rom_dout[4]),

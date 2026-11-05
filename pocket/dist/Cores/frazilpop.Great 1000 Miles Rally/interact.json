@@ -15,6 +15,18 @@
                 "mask": "0xFFFFFFFE"
             },
             {
+                "name": "Hide speed lines",
+                "id": 16,
+                "type": "check",
+                "enabled": true,
+                "persist": true,
+                "address": "0xF1000018",
+                "defaultval": 0,
+                "value": "0x1",
+                "value_off": "0x0",
+                "mask": "0xFFFFFFFE"
+            },
+            {
                 "name": "Reset Game",
                 "id": 12,
                 "type": "action",

@@ -25,8 +25,8 @@
 //
 // --inputs takes tools/mame_gtmr_io_profile.lua's plan file ("<frame>
 // coin=1 b2=1 right=0 ..."), so a race can be played the same way in MAME
-// and here. The plan may also set pause=1/0 (the board's pause input; MAME
-// has no counterpart).
+// and here. The plan may also set hidelines=1/0 (Hide speed lines) and
+// pause=1/0 (the board's pause input); MAME has no counterpart to either.
 
 #include "Vkaneko_gtmr.h"
 #include "Vkaneko_gtmr___024root.h"
@@ -130,6 +130,7 @@ int main(int argc, char** argv) {
     t->rst = 1; t->rst_por = 1; t->rom_loaded = 0;
     t->p1 = 0; t->p2 = 0; t->coin = 0; t->start = 0; t->service = 0; t->test = 0;
     t->pause = 0;
+    t->hide_speed_lines = 0;
     // gtmr DSW1: everything off/default -> all ones in the high byte
     t->dsw = 0xff00;
     t->nv_we = 0; t->nv_dirty_clr = 0;
@@ -248,6 +249,7 @@ int main(int argc, char** argv) {
             else if (st.name == "coin")  { coinv  = st.val ? 1 : 0; t->coin  = coinv;  continue; }
             else if (st.name == "start") { startv = st.val ? 1 : 0; t->start = startv; continue; }
             else if (st.name == "pause") { t->pause = st.val ? 1 : 0; continue; }
+            else if (st.name == "hidelines") { t->hide_speed_lines = st.val ? 1 : 0; continue; }
             if (bit >= 0) {
                 if (st.val) p1v |= (1u << bit); else p1v &= ~(1u << bit);
                 t->p1 = p1v;

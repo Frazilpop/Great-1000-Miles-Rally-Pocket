@@ -120,15 +120,33 @@ localparam [SDR_AW:1] W_OKI1    = SDR_AW'(25'h0800000);    // byte 0x1000000
 localparam [SDR_AW:1] W_OKI2    = SDR_AW'(25'h0880000);    // byte 0x1100000
 
 // ================================================================ clocks
+// One 24-clock counter sets every phase on the board: the OKIs' 2 MHz
+// (oki_div 0), the pixel's 6 MHz (oki_div 0, 8, 16) and the 68000's three
+// clocks a phase pair (cpu_ph, cleared at 23 so it can never drift from
+// it). A frame is 33,792 of them, so the raster comes back to the same
+// phase every frame, which is what lets a save state leave the dividers out.
+reg [4:0] oki_div;
+always @(posedge clk) oki_div <= (oki_div == 5'd23) ? 5'd0 : oki_div + 5'd1;
+
 // Pixel: 48 / 8 = 6 MHz, as upstream. Everything video steps on it.
-reg [2:0] ce_div;
-always @(posedge clk) ce_div <= ce_div + 3'd1;
-wire ce_pix_i = (ce_div == 3'd0);
+wire [2:0] ce_div   = oki_div[2:0];
+wire       ce_pix_i = (ce_div == 3'd0);
 
 // ================================================================ resets
 // Held until the ROM is in SDRAM: fetching earlier reads whatever the memory
 // powered up with as reset vectors.
 wire cpu_rst = rst | ~rom_loaded;
+
+// The raster lets go of reset only on one phase of the 24-clock counter, so
+// on every launch hcnt steps at the same oki_div and a state's raster
+// position lines up with the 68000's and the OKIs' phase. The phase is 8,
+// a pixel clock, where the board harness has always released rst: there
+// this changes nothing.
+reg  rst_v_hold;
+always @(posedge clk)
+    if (rst)                  rst_v_hold <= 1'b1;
+    else if (oki_div == 5'd8) rst_v_hold <= 1'b0;
+wire rst_v = rst | (rst_v_hold & (oki_div != 5'd8));
 
 // ================================================================ clocks (68000, OKI)
 // 68000: 16 MHz from 48 is three clocks per CPU clock, one phase enable on
@@ -138,21 +156,24 @@ wire cpu_rst = rst | ~rom_loaded;
 // Pause withholds both enables, so fx68k simply stands still. It takes hold
 // only while AS is high, so no device is left part-way through a bus cycle
 // (the 68000 is never more than one bus cycle from AS going high), and lets
-// go at once. Never in reset: fx68k needs its enables to come out of one.
+// go within a phase pair. Never in reset: fx68k needs its enables to come out
+// of one. It changes only at cpu_ph 2, so the last enable before a hold is a
+// phi2 and the first after it a phi1: a hold landing between the two would
+// give the 68000 two enables of the same phase.
 wire      ASn, LDSn, UDSn, eRWn, DTACKn;
 reg [1:0] cpu_ph;
 reg       cpu_hold;
 always @(posedge clk) begin
-    cpu_ph <= (cpu_ph == 2'd2) ? 2'd0 : cpu_ph + 2'd1;
-    if (!pause || cpu_rst) cpu_hold <= 1'b0;
-    else if (ASn)          cpu_hold <= 1'b1;
+    cpu_ph <= (cpu_ph == 2'd2 || oki_div == 5'd23) ? 2'd0 : cpu_ph + 2'd1;
+    if (cpu_ph == 2'd2) begin
+        if (!pause || cpu_rst) cpu_hold <= 1'b0;
+        else if (ASn)          cpu_hold <= 1'b1;
+    end
 end
 wire enPhi1 = (cpu_ph == 2'd0) & ~cpu_hold;
 wire enPhi2 = (cpu_ph == 2'd1) & ~cpu_hold;
 
-// OKIs: 16 MHz / 8 = 2 MHz, i.e. 48 / 24.
-reg [4:0] oki_div;
-always @(posedge clk) oki_div <= (oki_div == 5'd23) ? 5'd0 : oki_div + 5'd1;
+// OKIs: 16 MHz / 8 = 2 MHz, i.e. 48 / 24 (oki_div, above).
 wire oki_cen = (oki_div == 5'd0) & ~cpu_hold;
 
 // ================================================================ timing
@@ -163,7 +184,7 @@ wire       hs_i, vs_i, hb_i, vb_i, de_i, vbl_rise;
 // 320 x 240 from line 0, the gtmr machine config's visible area.
 kaneko_video_timing u_timing
 (
-    .clk(clk), .rst(rst), .ce_pix(ce_pix_i),
+    .clk(clk), .rst(rst_v), .ce_pix(ce_pix_i),
     .h_vis(10'd320), .v_vis(10'd240),
     .v_start(10'd0), .h_sync_start(10'd336), .h_start(9'd0),
     .hcnt(hcnt), .vcnt(vcnt), .screen_x(screen_x), .screen_y(screen_y),

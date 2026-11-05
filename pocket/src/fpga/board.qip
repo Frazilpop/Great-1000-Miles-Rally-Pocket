@@ -1,6 +1,7 @@
 # The board's RTL: everything kaneko_gtmr needs that is not part of the Pocket
 # shell. ap_core.qsf pulls it in whole. Keep in step with sim/gtmr/build.sh,
-# which compiles the same list (with fx68k's hdl/verilator/ variant instead).
+# which compiles the same list (fx68k's hdl/ too, with its nanocode struct
+# packed for Verilator).
 #
 # Paths are relative to this file (pocket/src/fpga), via $::quartus(qip_path),
 # so the list works from any project that includes it.

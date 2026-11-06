@@ -2,7 +2,7 @@
     "core": {
         "magic": "APF_VER_1",
         "metadata": {
-            "platform_ids": ["kaneko16"],
+            "platform_ids": ["kaneko16", "analogizer"],
             "shortname": "Great 1000 Miles Rally",
             "description": "Great 1000 Miles Rally and Mille Miglia 2 (Kaneko16)",
             "author": "frazilpop",
@@ -20,7 +20,7 @@
             },
             "hardware": {
                 "link_port": false,
-                "cartridge_adapter": -1
+                "cartridge_adapter": 0
             }
         },
         "cores": [

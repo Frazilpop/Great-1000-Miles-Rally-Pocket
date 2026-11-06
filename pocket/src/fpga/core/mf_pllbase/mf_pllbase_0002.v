@@ -18,6 +18,8 @@
 //   outclk_2   96 MHz  /9    SDRAM pin clock, 180 degrees (5208 ps) behind
 //   outclk_3    6 MHz  /144  APF video_rgb_clock (= the board's ce_pix rate)
 //   outclk_4    6 MHz  /144  video_rgb_clock_90, 90 degrees (41667 ps)
+//   outclk_5   24 MHz  /36   the Analogizer (pocket_analogizer): four clocks
+//                            a dot, every edge on a 48 MHz rising edge
 //
 // All are exact. 48 and 96 are the clocks upstream closes at, and the 2:1
 // pair is what kaneko_sdram_x2 assumes (edges aligned, not a CDC). 6 MHz is
@@ -62,6 +64,8 @@ module  mf_pllbase_0002(
 
 	// interface 'outclk4'
 	output wire outclk_4,
+	// interface 'outclk5'
+	output wire outclk_5,
 
 	// interface 'locked'
 	output wire locked
@@ -71,7 +75,7 @@ module  mf_pllbase_0002(
 		.fractional_vco_multiplier("false"),
 		.reference_clock_frequency("74.25 MHz"),
 		.operation_mode("normal"),
-		.number_of_clocks(5),
+		.number_of_clocks(6),
 		.output_clock_frequency0("48.000000 MHz"),
 		.phase_shift0("0 ps"),
 		.duty_cycle0(50),
@@ -87,7 +91,7 @@ module  mf_pllbase_0002(
 		.output_clock_frequency4("6.000000 MHz"),
 		.phase_shift4("41667 ps"),
 		.duty_cycle4(50),
-		.output_clock_frequency5("0 MHz"),
+		.output_clock_frequency5("24.000000 MHz"),
 		.phase_shift5("0 ps"),
 		.duty_cycle5(50),
 		.output_clock_frequency6("0 MHz"),
@@ -130,7 +134,7 @@ module  mf_pllbase_0002(
 		.pll_subtype("General")
 	) altera_pll_i (
 		.rst	(rst),
-		.outclk	({outclk_4, outclk_3, outclk_2, outclk_1, outclk_0}),
+		.outclk	({outclk_5, outclk_4, outclk_3, outclk_2, outclk_1, outclk_0}),
 		.locked	(locked),
 		.fboutclk	( ),
 		.fbclk	(1'b0),

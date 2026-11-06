@@ -4,6 +4,8 @@
 #   make lint     verilator --lint-only over all RTL
 #   make test     build and run every simulation harness
 #   make area     yosys area estimate for a module (MOD=kaneko_tmap_layer)
+#   make anz      the Analogizer beside the board harness, every mode and pad
+#                 checked (tools/pocket/check_analogizer.py)
 #   make clean
 #
 # The board as a whole is simulated by sim/gtmr/build.sh and built for the
@@ -45,7 +47,7 @@ HARNESSES := kaneko_tmap:kaneko_tmap_layer:sim/video/tb_kaneko_tmap.cpp \
              kaneko_oki:kaneko_oki_harness:sim/sound/tb_kaneko_oki.cpp:JT6295 \
              kaneko_toybox:kaneko_toybox:sim/mcu/tb_kaneko_toybox.cpp
 
-.PHONY: all lint test clean area
+.PHONY: all lint test clean area anz
 # GCC writes temporaries to $TMPDIR, which defaults to /tmp — a 16 GB tmpfs
 # here. Parallel Verilator builds of fx68k filled it and every harness failed
 # with "Disk quota exceeded", which reads like a permissions or code fault.
@@ -92,5 +94,15 @@ area:
 
 # Everything generated lives under build/, so a clean is complete and git
 # status stays readable.
+# The Analogizer: the board harness with pocket_analogizer beside it
+# (sim/gtmr/build.sh --anz, build/obj_anz/tb_gtmr), then
+# tools/pocket/check_analogizer.py: the cartridge pins in every video mode
+# against the board's frame, the tie-offs with it off, SNAC pads under every
+# assignment.
+anz:
+	@mkdir -p build
+	sim/gtmr/build.sh --anz > build/anz_build.log 2>&1 || { grep -m5 Error build/anz_build.log; exit 1; }
+	python3 -I tools/pocket/check_analogizer.py
+
 clean:
 	rm -rf build obj_* yosys.log abc.history

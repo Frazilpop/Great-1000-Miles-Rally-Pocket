@@ -7,6 +7,11 @@ lint_off -file "*/pocket/src/fpga/core/core_bridge_cmd.v"
 lint_off -file "*/pocket/src/fpga/core/pin_ddio_clk.v"
 lint_off -file "*/pocket/src/fpga/core/mf_pllbase*"
 lint_off -file "*/pocket/lint/altera_stubs.v"
+// RndMnkIII's Analogizer module, vendored (pocket/src/fpga/analogizer/), and
+// the lint's copy of its scandoubler. Without -match, Verilator 5.052 leaves
+// most of their warnings standing.
+lint_off -file "*/pocket/src/fpga/analogizer/*" -match "*"
+lint_off -file "*/build/tmp/anz/*" -match "*"
 // The board is a stub with final ports and is someone else's file.
 lint_off -rule UNUSEDSIGNAL -file "*/pocket/src/fpga/board_stub/*"
 lint_off -rule PROCASSINIT -file "*/pocket/src/fpga/board_stub/*"

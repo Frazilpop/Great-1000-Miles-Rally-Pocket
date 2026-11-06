@@ -189,6 +189,7 @@ names = {
     "general[2]": "clk_sdram_ps 96/180",
     "general[3]": "clk_vid 6",
     "general[4]": "clk_vid90 6/90",
+    "general[5]": "clk_anz 24",
 }
 def label(clk):
     for k, v in names.items():

@@ -13,8 +13,10 @@
 //   clk_sdram_ps   96 MHz     180 deg, forwarded to dram_clk
 //   clk_vid         6 MHz     APF video bus
 //   clk_vid90       6 MHz     90 deg, for APF's video DDR
+//   clk_anz        24 MHz     the Analogizer (pocket_analogizer): four clocks
+//                             a dot, and the adapter's DAC clock
 //
-// 48, 96 and 6 come from one VCO and are synchronous; everything they share
+// 48, 96, 6 and 24 come from one VCO and are synchronous; everything they share
 // with clk_74a crosses through a synchroniser, a dcfifo or a dual-clock RAM,
 // and core_constraints.sdc cuts exactly those.
 //
@@ -25,6 +27,8 @@
 //   0x40000000-   save state, 0x58000 bytes, r/w        pocket_state
 //   0xF0000000    game id (instance JSON memory_writes) r/w
 //   0xF1000000-   options (interact.json)               r/w, see below
+//   0xF7000000    analogizer.bin, the Analogizer's      pocket_analogizer
+//                 settings (write only)
 //   0xF8000000-   APF command bridge                    core_bridge_cmd
 //
 // DATA SLOTS (dist/Cores/frazilpop.Great 1000 Miles Rally/data.json), in table order:
@@ -32,6 +36,8 @@
 //   [0] id 0  instance JSON (APF requires the instance slot to come first)
 //   [1] id 1  <set>.rom at 0x00000000
 //   [2] id 2  <set>.sav at 0x20000000, nonvolatile, 128 bytes
+//   [3] id 330 analogizer.bin at 0xF7000000, from Assets/analogizer/common/
+//             (platform index 1), if it is there
 
 `default_nettype none
 
@@ -272,21 +278,8 @@ assign port_ir_rx_disable = 1;
 // bridge endianness
 assign bridge_endian_little = 0;
 
-// cart is unused, so set all level translators accordingly
-// directions are 0:IN, 1:OUT
-assign cart_tran_bank3 = 8'hzz;
-assign cart_tran_bank3_dir = 1'b0;
-assign cart_tran_bank2 = 8'hzz;
-assign cart_tran_bank2_dir = 1'b0;
-assign cart_tran_bank1 = 8'hzz;
-assign cart_tran_bank1_dir = 1'b0;
-assign cart_tran_bank0 = 4'hf;
-assign cart_tran_bank0_dir = 1'b1;
-assign cart_tran_pin30 = 1'b0;      // reset or cs2, we let the hw control it by itself
-assign cart_tran_pin30_dir = 1'bz;
-assign cart_pin30_pwroff_reset = 1'b0;  // hardware can control this
-assign cart_tran_pin31 = 1'bz;      // input
-assign cart_tran_pin31_dir = 1'b0;  // input
+// the cartridge slot is the Analogizer's (pocket_analogizer, after the
+// menu's black), idle as the template leaves it when there is no adapter
 
 // link port is unused, set to input only to be safe
 // each bit may be bidirectional in some applications
@@ -305,7 +298,7 @@ assign aux_scl = 1'bZ;
 assign vpll_feed = 1'bZ;
 
 // ================================================================= clocks
-wire clk_core, clk_sdram, clk_sdram_ps, clk_vid, clk_vid90;
+wire clk_core, clk_sdram, clk_sdram_ps, clk_vid, clk_vid90, clk_anz;
 wire pll_core_locked;
 
 mf_pllbase mp1 (
@@ -316,6 +309,7 @@ mf_pllbase mp1 (
     .outclk_2 ( clk_sdram_ps ),
     .outclk_3 ( clk_vid ),
     .outclk_4 ( clk_vid90 ),
+    .outclk_5 ( clk_anz ),
     .locked   ( pll_core_locked )
 );
 
@@ -668,9 +662,15 @@ wire board_rst = rst_por | ((~reset_n_48 | host_rst) & ~ss_hold_reset);
 //   p1/p2 = {b4,b3,b2,b1,right,left,down,up} is exactly key[7:0]:
 //   up, down, left, right, A (button 1, accelerate), B (button 2, brake),
 //   X (button 3), Y (button 4). Select is coin, Start is start.
+//
+// An Analogizer's SNAC controllers (pocket_analogizer) stand in for the
+// Pocket's controls of the players analogizer.bin gives them to, as they
+// are: their words are in cont_key's order. With no file, or the Analogizer
+// off, key1 and key2 are cont1_key and cont2_key.
+wire [15:0] key1, key2;
 wire [15:0] k1, k2;
-synch_3 #(.WIDTH(16)) s_k1 (.i(cont1_key[15:0]), .o(k1), .clk(clk_core), .rise(), .fall());
-synch_3 #(.WIDTH(16)) s_k2 (.i(cont2_key[15:0]), .o(k2), .clk(clk_core), .rise(), .fall());
+synch_3 #(.WIDTH(16)) s_k1 (.i(key1), .o(k1), .clk(clk_core), .rise(), .fall());
+synch_3 #(.WIDTH(16)) s_k2 (.i(key2), .o(k2), .clk(clk_core), .rise(), .fall());
 
 wire [7:0] in_p1    = k1[7:0];
 wire [7:0] in_p2    = k2[7:0];
@@ -1199,6 +1199,41 @@ pocket_diag u_diag (
 assign {mr, mg, mb} = (inmenu_48 | ss_load_blank) ? 24'd0 : {dr, dg, db};
 wire [15:0] snd_out = ss_load_blank ? 16'd0 : snd;
 
+// ============================================================= Analogizer
+//
+// The board's raster, as the Pocket's screen gets it (the overlay in, black
+// under the menu and behind a load, the syncs running on), out of the
+// cartridge slot; and SNAC controllers in (inputs, above).
+// pocket_analogizer says how it is set.
+wire anz_pocket_off;
+pocket_analogizer u_analogizer (
+    .clk_74a        (clk_74a),
+    .bridge_wr      (bridge_wr),
+    .bridge_addr    (bridge_addr),
+    .bridge_wr_data (bridge_wr_data),
+    .clk_core       (clk_core),
+    .ce_pix         (ce_pix),
+    .vs             (vs),
+    .hblank         (hblank),     .vblank (vblank_b),
+    .r              (mr),         .g      (mg),       .b  (mb),
+    .pocket_off     (anz_pocket_off),
+    .clk_anz        (clk_anz),
+    .cont1_key      (cont1_key[15:0]), .cont2_key (cont2_key[15:0]),
+    .key1           (key1),       .key2   (key2),
+    .cart_tran_bank2 (cart_tran_bank2), .cart_tran_bank2_dir (cart_tran_bank2_dir),
+    .cart_tran_bank3 (cart_tran_bank3), .cart_tran_bank3_dir (cart_tran_bank3_dir),
+    .cart_tran_bank1 (cart_tran_bank1), .cart_tran_bank1_dir (cart_tran_bank1_dir),
+    .cart_tran_bank0 (cart_tran_bank0), .cart_tran_bank0_dir (cart_tran_bank0_dir),
+    .cart_tran_pin30 (cart_tran_pin30), .cart_tran_pin30_dir (cart_tran_pin30_dir),
+    .cart_pin30_pwroff_reset (cart_pin30_pwroff_reset),
+    .cart_tran_pin31 (cart_tran_pin31), .cart_tran_pin31_dir (cart_tran_pin31_dir)
+);
+
+// the Pocket's own screen black when analogizer.bin asks for it
+wire [7:0] pr = anz_pocket_off ? 8'd0 : mr;
+wire [7:0] pg = anz_pocket_off ? 8'd0 : mg;
+wire [7:0] pb = anz_pocket_off ? 8'd0 : mb;
+
 // ================================================================== video
 assign video_rgb_clock    = clk_vid;
 assign video_rgb_clock_90 = clk_vid90;
@@ -1210,9 +1245,9 @@ pocket_video u_video (
     .vs        (vs),
     .hblank    (hblank),
     .vblank    (vblank_b),
-    .r         (mr),
-    .g         (mg),
-    .b         (mb),
+    .r         (pr),
+    .g         (pg),
+    .b         (pb),
     .clk_vid   (clk_vid),
     .video_rgb (video_rgb),
     .video_de  (video_de),

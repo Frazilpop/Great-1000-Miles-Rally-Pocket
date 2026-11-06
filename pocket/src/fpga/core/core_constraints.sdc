@@ -15,12 +15,13 @@ set clk_sdram    [get_clocks -nowarn "${pll_path}|general\[1\].gpll~PLL_OUTPUT_C
 set clk_sdram_ps [get_clocks -nowarn "${pll_path}|general\[2\].gpll~PLL_OUTPUT_COUNTER|divclk"]
 set clk_vid      [get_clocks -nowarn "${pll_path}|general\[3\].gpll~PLL_OUTPUT_COUNTER|divclk"]
 set clk_vid90    [get_clocks -nowarn "${pll_path}|general\[4\].gpll~PLL_OUTPUT_COUNTER|divclk"]
+set clk_anz      [get_clocks -nowarn "${pll_path}|general\[5\].gpll~PLL_OUTPUT_COUNTER|divclk"]
 
 # An empty collection turns set_clock_groups and set_multicycle_path into
 # silent no-ops and the build "passes" untimed — upstream's Kaneko16.sdc has
 # the story. Here that is an error, not a warning.
 foreach {name c} [list core $clk_core sdram $clk_sdram sdram_ps $clk_sdram_ps \
-                       vid $clk_vid vid90 $clk_vid90] {
+                       vid $clk_vid vid90 $clk_vid90 anz $clk_anz] {
     if {[get_collection_size $c] == 0} {
         post_message -type error "core_constraints.sdc: PLL output '$name' not found under $pll_path. The constraints below would be no-ops; fix the path."
     }
@@ -44,7 +45,7 @@ create_generated_clock -name dram_clk_pin \
 # RAMs, and never by plain logic. Every one of them is listed in core_top.v.
 #
 # The PLL outputs are ONE group and are timed against each other, because
-# three crossings depend on it:
+# four crossings depend on it:
 #
 #   48 <-> 96   kaneko_sdram_x2: the 2:1 pair from one VCO, edges aligned,
 #               not a CDC. Cut these and the adapter's assumptions go untimed.
@@ -54,6 +55,11 @@ create_generated_clock -name dram_clk_pin \
 #               setup relationship and a 0 ns hold relationship. Timing it is
 #               what makes "a 6 MHz edge on the reload edge sees the old pixel"
 #               true in silicon, not just in the RTL comment.
+#   48 <-> 24   pocket_analogizer: its own `hold` (48 MHz, loaded on ce_pix)
+#               sampled on every 24 MHz edge, and back the SNAC controllers'
+#               words into core_top's input synchronisers. Every 24 MHz edge
+#               is on a 48 MHz rising edge, so these are ordinary paths of a
+#               48 MHz period (20.8 ns) with a 0 ns hold relationship.
 #   96 -> pin   the SDRAM I/O below, against dram_clk_pin.
 set_clock_groups -asynchronous \
     -group [get_clocks {clk_74a}] \

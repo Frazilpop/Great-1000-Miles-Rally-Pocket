@@ -53,12 +53,49 @@
 //   --after N            run N frames after the let-go, writing after.txt:
 //                        one line a frame, "<k> <picture CRC> <sound CRC>",
 //                        the sound's from the let-go's clock, every clock
+//                        (0: to <frames> as given, the frames counted from
+//                        power-on as ever)
 // Each says the frame it froze in, the line, the 68000's PC and how many OKI
 // channels were playing.
+//
+// Built with -DANALOGIZER (sim/gtmr/build.sh --anz, build/obj_anz/), the
+// shell's pocket_analogizer is on the board's raster as a model of its own
+// (sim/gtmr/anz_top.sv), black while the board's pause is on (standing for
+// the Pocket's menu) or pocket_state's load_blank is, on a clk_anz toggled at
+// each rising edge of the board's clock (both from the PLL's 864 MHz VCO, /18
+// and /36). The players' controls go into it as the Pocket's cont1_key and
+// cont2_key (the plan's, Select the coin and Start the start) and come out of
+// it into the board, as core_top has them:
+//     --anz-file FILE      analogizer.bin: its first four bytes written to
+//                          0xF7000000 as APF's bridge does, the first byte in
+//                          [31:24], at the start
+//     --anz-raw N          anz_NNNNN.raw: the cartridge pins at every clk_anz
+//                          rising edge while frame is N and N+1 (the picture
+//                          N is drawn in, after the start of vblank, and the
+//                          next, for the scandoubler's lines after it), five
+//                          bytes an edge - bank3, bank2, bank1, {pin31_dir,
+//                          pwroff, pin30_dir, pin30, bank3_dir, bank2_dir,
+//                          bank1_dir, bank0_dir} and {pin31 in, 3'b0,
+//                          bank0[7:4]} - for tools/pocket/check_analogizer.py
+//     --anz-pad snes|nes|db15  two pads of that kind on the SNAC port,
+//                          answering its latch and clock as the pads' shift
+//                          registers do; from 20 frames in, each button
+//                          pressed in turn for four frames (pad 2 the next
+//                          button in the list). anz_keys.csv has, at the end
+//                          of every frame, the buttons held and the players'
+//                          controls (key1, key2) as pocket_analogizer gives them
+//     --anz-cont A,B       the Pocket's own controls (cont1-2_key[15:0], hex),
+//                          ORed with the plan's
+// At the end it prints the word pocket_analogizer took and the clk_anz edges
+// on which the pins, the Analogizer off, differed from the template's
+// tie-offs.
 
 #include "Vkaneko_gtmr.h"
 #include "Vbridge.h"
 #include "Vkaneko_gtmr___024root.h"
+#ifdef ANALOGIZER
+#include "Vanz.h"
+#endif
 #include "verilated.h"
 
 #include <cstdio>
@@ -68,6 +105,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <functional>
 #include <sys/stat.h>
 
 static const int NP = 9;
@@ -118,6 +156,10 @@ int main(int argc, char** argv) {
     int save2_frame = -1;
     bool pocket = false, p_reset = false, p_menu = false, crc_all = false;
     int p_period = 75;
+    const char* anz_file = nullptr;
+    int anz_raw = -1;
+    std::string anz_pad;
+    unsigned anz_cont[2] = {0, 0};
     for (int i = 5; i < argc; i++) {
         if (!strcmp(argv[i], "--fb-lat") && i + 1 < argc)       fb_lat  = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--rom-lat") && i + 1 < argc) rom_lat = atoi(argv[++i]);
@@ -140,6 +182,12 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--pocket-period") && i + 1 < argc) p_period = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pocket-reset"))              p_reset = true;
         else if (!strcmp(argv[i], "--pocket-menu"))               p_menu = true;
+#ifdef ANALOGIZER
+        else if (!strcmp(argv[i], "--anz-file") && i + 1 < argc)  anz_file = argv[++i];
+        else if (!strcmp(argv[i], "--anz-raw") && i + 1 < argc)   anz_raw = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--anz-pad") && i + 1 < argc)   anz_pad = argv[++i];
+        else if (!strcmp(argv[i], "--anz-cont") && i + 1 < argc)  sscanf(argv[++i], "%x,%x", &anz_cont[0], &anz_cont[1]);
+#endif
         else {
             std::string s = argv[i];
             size_t p = 0;
@@ -186,7 +234,48 @@ int main(int argc, char** argv) {
 
     uint64_t cyc = 0;
     Vbridge* br = nullptr;
+    // the plan's controls (apply_inputs, below), here so that tick can hand
+    // them to the Analogizer
+    uint8_t p1v = 0, coinv = 0, startv = 0;
+#ifdef ANALOGIZER
+    Vanz* a = new Vanz;
+    a->clk_core = 0; a->clk_anz = 0; a->anz_wr = 0; a->anz_data = 0;
+    a->ce_pix = 0; a->vs = 0; a->hblank = 0; a->vblank = 0; a->r = 0; a->g = 0; a->b = 0;
+    a->black = 0; a->cont1_key = anz_cont[0]; a->cont2_key = anz_cont[1];
+    a->bank0_in = 0xf; a->pin31_in = 1;
+    a->eval();
+    int anz_wr_left = 0;
+    if (anz_file) {
+        uint8_t b[4] = {0, 0, 0, 0};
+        FILE* f = fopen(anz_file, "rb");
+        if (!f) { perror(anz_file); return 1; }
+        size_t n = fread(b, 1, 4, f);
+        fclose(f);
+        a->anz_data = (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
+        a->anz_wr = 1;
+        anz_wr_left = 8;
+        fprintf(stderr, "analogizer.bin: %zu bytes, word %08x\n", n,
+                (unsigned)(b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24));
+    }
+    std::function<void()> anz_edge;
+#endif
     auto tick = [&]() {
+#ifdef ANALOGIZER
+        // the board's outputs as they stood before this edge, and the
+        // players' controls it gave on the last; the board takes them as
+        // core_top's synch_3s would, a little sooner
+        a->clk_core = 0; a->eval();
+        a->ce_pix = t->ce_pix; a->vs = t->vs; a->hblank = t->hblank; a->vblank = t->vblank;
+        a->r = t->r; a->g = t->g; a->b = t->b;
+        a->black = t->pause || (br && br->load_blank);
+        a->cont1_key = anz_cont[0] | p1v | coinv << 14 | startv << 15;
+        a->cont2_key = anz_cont[1];
+        uint16_t k1 = a->key1, k2 = a->key2;
+        t->p1 = k1 & 0xff; t->p2 = k2 & 0xff;
+        t->coin = (k1 >> 14 & 1) | (k2 >> 14 & 1) << 1;
+        t->start = (k1 >> 15 & 1) | (k2 >> 15 & 1) << 1;
+        if (anz_wr_left && --anz_wr_left == 0) a->anz_wr = 0;
+#endif
         if (br) {
             // the window between them, as each stood before this edge
             br->ss_status = t->ss_status; br->ss_loading = t->ss_loading;
@@ -198,6 +287,10 @@ int main(int argc, char** argv) {
         t->clk = 0; t->eval();
         t->clk = 1; t->eval();
         if (br) { br->clk = 1; br->eval(); }
+#ifdef ANALOGIZER
+        a->clk_core = 1; a->clk_anz = !a->clk_anz; a->eval();
+        if (a->clk_anz && anz_edge) anz_edge();
+#endif
         cyc++;
     };
     if (pocket) {
@@ -298,7 +391,6 @@ int main(int argc, char** argv) {
         fclose(f);
         fprintf(stderr, "inputs: %zu steps from %s\n", plan.size(), inputs_path);
     }
-    uint8_t p1v = 0, coinv = 0, startv = 0;
     int plan_offset = 0;          // a loaded run: its frames against the saving run's
     auto apply_inputs = [&](int fr) {
         while (plan_i < plan.size() && plan[plan_i].frame <= fr) {
@@ -388,7 +480,7 @@ int main(int argc, char** argv) {
         std::string ap = outdir + "/after.txt";
         after = fopen(ap.c_str(), "w");
         after_k = 0; snd_crc = 0;
-        frames = frame + after_frames;
+        if (after_frames > 0) frames = frame + after_frames;
         fprintf(stderr, "state: let go at frame %d, clock %llu\n", frame, (unsigned long long)cyc);
         if (trace_path && !trace && (!resave_path || reading_resave || !load_path)) trace = fopen(trace_path, "w");
         if (save_path && !load_path) {
@@ -497,6 +589,74 @@ int main(int argc, char** argv) {
         br->clk_74a = 0; br->eval();
     };
     bool p_letgo_seen = false;
+
+#ifdef ANALOGIZER
+    std::vector<uint8_t> anz_buf, anz_prev;
+    uint64_t anz_off_edges = 0, anz_idle_bad = 0;
+    int anz_idx = 0, anz_frame0 = frame;
+    bool anz_clk_prev = false;
+    uint32_t anz_held[2] = {0, 0}, anz_held_db15 = 0;
+    // each pad's buttons, in the order its shift register sends them
+    static const char* snes_b[] = {"B", "Y", "Select", "Start", "Up", "Down", "Left", "Right", "A", "X", "L", "R"};
+    static const char* nes_b[]  = {"A", "B", "Select", "Start", "Up", "Down", "Left", "Right"};
+    // DB15's two 74HC165s: P1 D C B A Right Left Down Up, P2 Right Left Down
+    // Up, P1 F E Select Start, P2 F E Select Start D C B A
+    static const int db15_p1[] = {0, 1, 2, 3, 4, 5, 6, 7, 13, 12, 14, 15};
+    static const int db15_p2[] = {20, 21, 22, 23, 8, 9, 10, 11, 17, 16, 18, 19};
+    static const char* db15_n[] = {"D", "C", "B", "A", "Right", "Left", "Down", "Up", "E", "F", "Select", "Start"};
+    const char** pad_names = anz_pad == "snes" ? snes_b : anz_pad == "nes" ? nes_b : db15_n;
+    int pad_n = anz_pad == "nes" ? 8 : 12;
+    FILE* anz_keys = anz_pad.empty() ? nullptr : fopen((outdir + "/anz_keys.csv").c_str(), "w");
+    if (anz_keys) fprintf(anz_keys, "frame,pad1,pad2,key1,key2\n");
+    // the buttons held in frame f (counted from the start of this run), pad_n none
+    auto anz_press = [&](int f, int& k, int& k2) {
+        k = f >= 20 ? ((f - 20) / 4) % (pad_n + 1) : pad_n;
+        k2 = k < pad_n ? (k + 1) % pad_n : pad_n;
+    };
+    auto anz_hold = [&](int f) {
+        int n, n2;
+        anz_press(f, n, n2);
+        if (anz_pad == "db15")
+            anz_held_db15 = (n < pad_n ? 1u << db15_p1[n] : 0) | (n2 < pad_n ? 1u << db15_p2[n2] : 0);
+        else {
+            anz_held[0] = n < pad_n ? 1u << n : 0;
+            anz_held[1] = n2 < pad_n ? 1u << n2 : 0;
+        }
+    };
+    anz_hold(0);
+    anz_edge = [&]() {
+        uint8_t b3 = a->bank3, b2 = a->bank2, b1 = a->bank1;
+        uint8_t misc = (a->bank0_dir & 1) | (a->bank1_dir & 1) << 1 | (a->bank2_dir & 1) << 2 |
+                       (a->bank3_dir & 1) << 3 | (a->pin30 & 1) << 4 | (a->pin30_dir & 1) << 5 |
+                       (a->pwroff & 1) << 6 | (a->pin31_dir & 1) << 7;
+        if (anz_raw >= 0 && (frame == anz_raw || frame == anz_raw + 1)) {
+            anz_buf.push_back(b3); anz_buf.push_back(b2); anz_buf.push_back(b1); anz_buf.push_back(misc);
+            anz_buf.push_back((uint8_t)((a->pin31_in & 1) << 7 | (a->bank0 & 0xf)));
+        }
+        if (!(a->cfg & 0x20)) {
+            anz_off_edges++;
+            // the template's: banks 1-3 inputs, bank0 an output at F, pin30
+            // driven low, pwroff low, pin31 an input
+            if ((misc & 0xdf) != 0x01 || a->bank0 != 0xf) anz_idle_bad++;
+        }
+        // the pads: shift registers on the latch (bank1[7]) and clock (bank1[6])
+        if (anz_pad.empty()) return;
+        bool lat = b1 >> 7 & 1, clk = b1 >> 6 & 1;
+        bool db15 = anz_pad == "db15";
+        bool load = db15 ? !lat : lat;          // DB15's 74HC165s load on a low latch
+        if (load) anz_idx = 0;
+        else if (clk && !anz_clk_prev) anz_idx++;
+        anz_clk_prev = clk;
+        auto bit = [&](int pad, int i) -> int {   // 0 pressed, 1 released
+            if (db15) return (i < 24 && (anz_held_db15 >> i & 1)) ? 0 : 1;
+            if (i >= 16) return 0;                // low after the sixteenth, as a pad is
+            return (i < 12 && (anz_held[pad] >> i & 1)) ? 0 : 1;
+        };
+        int d1 = bit(0, anz_idx), d2 = db15 ? 1 : bit(1, anz_idx);
+        a->bank0_in = 0xc | d2 << 1 | d1;      // IO3 = bank0[4], IN7 = bank0[5]
+        a->pin31_in = db15 ? d1 : 1;           // DB15's data twice (crossed cables)
+    };
+#endif
 
     while (frame < frames) {
         if (br) {
@@ -765,6 +925,24 @@ int main(int argc, char** argv) {
                     fflush(after);
                 }
                 frame++;
+#ifdef ANALOGIZER
+                if (anz_raw >= 0 && frame == anz_raw + 2) {
+                    char fn[512];
+                    snprintf(fn, sizeof fn, "%s/anz_%05d.raw", outdir.c_str(), anz_raw);
+                    FILE* f = fopen(fn, "wb");
+                    fwrite(anz_buf.data(), 1, anz_buf.size(), f);
+                    fclose(f);
+                    anz_buf.clear();
+                }
+                if (anz_keys) {
+                    // what was held this frame, and the controls it gave
+                    int k, k2;
+                    anz_press(frame - 1 - anz_frame0, k, k2);
+                    fprintf(anz_keys, "%d,%s,%s,%04x,%04x\n", frame - 1, k < pad_n ? pad_names[k] : "-",
+                            k2 < pad_n ? pad_names[k2] : "-", (unsigned)a->key1, (unsigned)a->key2);
+                    anz_hold(frame - anz_frame0);
+                }
+#endif
                 apply_inputs(frame + plan_offset);
                 y = 0; x = 0;
             }
@@ -773,6 +951,14 @@ int main(int argc, char** argv) {
     }
 
     fclose(stats);
+#ifdef ANALOGIZER
+    if (anz_keys) fclose(anz_keys);
+    fprintf(stderr, "analogizer: word taken %08x; pins off the template's on %llu of %llu edges with it off; "
+            "Pocket screen %s\n", (unsigned)a->cfg, (unsigned long long)anz_idle_bad,
+            (unsigned long long)anz_off_edges, a->pocket_off ? "off" : "on");
+    a->final();
+    delete a;
+#endif
     if (after) fclose(after);
     if (crcf) fclose(crcf);
     t->final();

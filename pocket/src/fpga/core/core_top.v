@@ -22,6 +22,7 @@
 //
 //   0x00000000-   ROM image data slot -> SDRAM          pocket_rom_loader
 //   0x20000000-   EEPROM save slot, 128 bytes, r/w      pocket_nvram
+//   0x40000000-   save state, 0x58000 bytes, r/w        pocket_state
 //   0xF0000000    game id (instance JSON memory_writes) r/w
 //   0xF1000000-   options (interact.json)               r/w, see below
 //   0xF8000000-   APF command bridge                    core_bridge_cmd
@@ -362,6 +363,7 @@ synch_3 s_rstn48 (.i(reset_n), .o(reset_n_48), .clk(clk_core), .rise(), .fall())
 
 wire [31:0] cmd_bridge_rd_data;
 wire [31:0] nv_bridge_rd;
+wire [31:0] ss_bridge_rd;
 
 // ---- settings written by APF (instance JSON, interact.json)
 //
@@ -438,6 +440,7 @@ end
 always @(posedge clk_74a) begin
     casez (bridge_addr)
     32'h2???????: bridge_rd_data <= nv_bridge_rd;
+    32'h4???????: bridge_rd_data <= ss_bridge_rd;
     32'hF0000000: bridge_rd_data <= {29'd0, game_74};
     32'hF1000000: bridge_rd_data <= opt_74;
     32'hF1000014: bridge_rd_data <= {31'd0, diag_74};
@@ -506,22 +509,23 @@ wire     [31:0] rtc_date_bcd;
 wire     [31:0] rtc_time_bcd;
 wire            rtc_valid;
 
-wire            savestate_supported   = 1'b0;
-wire    [31:0]  savestate_addr        = 32'd0;
-wire    [31:0]  savestate_size        = 32'd0;
-wire    [31:0]  savestate_maxloadsize = 32'd0;
+// Save states (Memories and Sleep): pocket_state and the board's window.
+wire            savestate_supported   = 1'b1;
+wire    [31:0]  savestate_addr        = 32'h4000_0000;
+wire    [31:0]  savestate_size        = 32'h0005_8000;
+wire    [31:0]  savestate_maxloadsize = 32'h0005_8000;
 
 wire            savestate_start;
-wire            savestate_start_ack   = 1'b0;
-wire            savestate_start_busy  = 1'b0;
-wire            savestate_start_ok    = 1'b0;
-wire            savestate_start_err   = 1'b0;
+wire            savestate_start_ack;
+wire            savestate_start_busy;
+wire            savestate_start_ok;
+wire            savestate_start_err;
 
 wire            savestate_load;
-wire            savestate_load_ack    = 1'b0;
-wire            savestate_load_busy   = 1'b0;
-wire            savestate_load_ok     = 1'b0;
-wire            savestate_load_err    = 1'b0;
+wire            savestate_load_ack;
+wire            savestate_load_busy;
+wire            savestate_load_ok;
+wire            savestate_load_err;
 
 wire            osnotify_inmenu;
 
@@ -650,7 +654,10 @@ pocket_sync_bus #(.W(22), .INIT({3'd0, 16'hff00, 3'b000})) s_cfg48 (
     .q   ({game,    dsw,    host_rst, diag_opt, hide_speed_lines})
 );
 
-wire board_rst = rst_por | ~reset_n_48 | host_rst;
+// A save state's load keeps the Pocket's own reset off the board from the
+// header's match until it has let go: a wake's file may come before Reset Exit.
+wire ss_hold_reset;
+wire board_rst = rst_por | ((~reset_n_48 | host_rst) & ~ss_hold_reset);
 
 // ================================================================== inputs
 //
@@ -675,7 +682,10 @@ wire [1:0] in_start = {k2[15], k1[15]};
 // out (after the overlay, below).
 wire inmenu_48;
 synch_3 s_inmenu48 (.i(osnotify_inmenu), .o(inmenu_48), .clk(clk_core), .rise(), .fall());
-wire pause = inmenu_48;
+// A save or a load lifts it (pocket_state): a save from the menu runs the game
+// on behind the black screen to its clean point, a frame or two at most.
+wire ss_pause_lift, ss_load_blank;
+wire pause = inmenu_48 & ~ss_pause_lift;
 
 // ========================================================= ROM -> SDRAM
 wire allcomplete_48;
@@ -932,6 +942,48 @@ pocket_nvram u_nvram (
     .nv_dirty_clr        (nv_dirty_clr)
 );
 
+// ================================================================== save states
+wire        ss_save, ss_go, ss_rd, ss_wr, ss_loading, ss_refused;
+wire [1:0]  ss_status;
+wire [17:0] ss_addr;
+wire [15:0] ss_do, ss_di;
+
+pocket_state u_state (
+    .clk_74a             (clk_74a),
+    .clk                 (clk_core),
+    .bridge_endian_little(bridge_endian_little),
+    .bridge_addr         (bridge_addr),
+    .bridge_rd           (bridge_rd),
+    .bridge_rd_data      (ss_bridge_rd),
+    .bridge_wr           (bridge_wr),
+    .bridge_wr_data      (bridge_wr_data),
+    .savestate_start     (savestate_start),
+    .savestate_start_ack (savestate_start_ack),
+    .savestate_start_busy(savestate_start_busy),
+    .savestate_start_ok  (savestate_start_ok),
+    .savestate_start_err (savestate_start_err),
+    .savestate_load      (savestate_load),
+    .savestate_load_ack  (savestate_load_ack),
+    .savestate_load_busy (savestate_load_busy),
+    .savestate_load_ok   (savestate_load_ok),
+    .savestate_load_err  (savestate_load_err),
+    .reset_n             (reset_n),
+    .rom_loaded          (rom_loaded),
+    .ss_save             (ss_save),
+    .ss_go               (ss_go),
+    .ss_status           (ss_status),
+    .ss_loading          (ss_loading),
+    .ss_refused          (ss_refused),
+    .ss_addr             (ss_addr),
+    .ss_rd               (ss_rd),
+    .ss_do               (ss_do),
+    .ss_wr               (ss_wr),
+    .ss_di               (ss_di),
+    .pause_lift          (ss_pause_lift),
+    .hold_reset          (ss_hold_reset),
+    .load_blank          (ss_load_blank)
+);
+
 // ================================================================== board
 wire        ce_pix, hs, vs, hblank, vblank_b;
 wire [7:0]  r, g, b;
@@ -1010,6 +1062,17 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
     .diag_wait_addr  (diag_wait_addr),
     .diag_stall_frames(diag_stall_frames),
     .diag_draw_max   (diag_draw_max),
+
+    .ss_save    (ss_save),
+    .ss_go      (ss_go),
+    .ss_status  (ss_status),
+    .ss_loading (ss_loading),
+    .ss_refused (ss_refused),
+    .ss_addr    (ss_addr),
+    .ss_rd      (ss_rd),
+    .ss_do      (ss_do),
+    .ss_wr      (ss_wr),
+    .ss_di      (ss_di),
     .diag_spr_overruns(diag_spr_overruns)
 );
 
@@ -1131,8 +1194,10 @@ pocket_diag u_diag (
     .r_out  (dr), .g_out (dg), .b_out (db)
 );
 
-// Black behind the Pocket's menu: the game is paused under it.
-assign {mr, mg, mb} = inmenu_48 ? 24'd0 : {dr, dg, db};
+// Black behind the Pocket's menu: the game is paused under it. Black while a
+// state loads too, and silent: the chips hold half of one.
+assign {mr, mg, mb} = (inmenu_48 | ss_load_blank) ? 24'd0 : {dr, dg, db};
+wire [15:0] snd_out = ss_load_blank ? 16'd0 : snd;
 
 // ================================================================== video
 assign video_rgb_clock    = clk_vid;
@@ -1167,8 +1232,8 @@ sound_i2s #(
 ) u_i2s (
     .clk_74a   (clk_74a),
     .clk_audio (clk_core),
-    .audio_l   (snd),
-    .audio_r   (snd),
+    .audio_l   (snd_out),
+    .audio_r   (snd_out),
     .audio_mclk(audio_mclk),
     .audio_lrck(audio_lrck),
     .audio_dac (audio_dac)

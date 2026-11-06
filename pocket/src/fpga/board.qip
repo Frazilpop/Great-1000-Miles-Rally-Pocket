@@ -11,6 +11,7 @@ set r [file join $q ../../../rtl]
 set t [file join $q ../../../third_party]
 
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $r top/kaneko_gtmr.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r top/kaneko_state.sv]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $r cpu/kaneko_gtmr_bus.sv]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $r cpu/kaneko_irq.sv]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $r io/kaneko_hit.sv]

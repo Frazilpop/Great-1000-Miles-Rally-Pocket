@@ -4,6 +4,8 @@
 //   tb_gtmr <set.rom> <game id> <frames> <outdir> [dump frames, comma list]
 //          [--fb-lat N] [--rom-lat N] [--ram-lat N] [--sdram-serial N]
 //          [--inputs plan.txt]
+//          [--state-save F FILE | --state-load FILE [--load-at F] [--resave FILE]]
+//          [--after N]
 //
 // Hosts kaneko_gtmr the way the Pocket shell does, with behavioural memories:
 //
@@ -27,8 +29,35 @@
 // coin=1 b2=1 right=0 ..."), so a race can be played the same way in MAME
 // and here. The plan may also set hidelines=1/0 (Hide speed lines) and
 // pause=1/0 (the board's pause input); MAME has no counterpart to either.
+//
+// Save states, through the board's state window (rtl/top/kaneko_state.sv), a
+// word every 20 clocks as the Pocket's bridge gives them:
+//   --state-save F FILE  asks for a clean point at frame F, reads the state
+//                        into FILE and lets the game go on; FILE.tb gets the
+//                        harness frame of the let-go, for the loaded run's inputs
+//   --state-load FILE    writes FILE into the board at frame --load-at (30)
+//                        and lets it go; the plan's inputs from the saving
+//                        run's frame of the let-go on
+//   --resave FILE        (with --state-load) reads the state back before the
+//                        let-go, into FILE
+//   --pocket             both through pocket/src/fpga/core/pocket_state.sv, the
+//                        Pocket's side, with the bridge's clock and commands as
+//                        the Pocket gives them: a pair of words read or written
+//                        every --pocket-period clocks of clk_74a (75, its
+//                        fastest), a pause of 40,000 after each 4 KB with the
+//                        last pair read again; --pocket-reset holds the
+//                        Pocket's reset over a load's file until after it,
+//                        --pocket-menu saves from under the menu's pause
+//   --crc                every frame's picture and sound CRCs to crc.txt, from the
+//                        start, saved or not (for a run against one that never saved)
+//   --after N            run N frames after the let-go, writing after.txt:
+//                        one line a frame, "<k> <picture CRC> <sound CRC>",
+//                        the sound's from the let-go's clock, every clock
+// Each says the frame it froze in, the line, the 68000's PC and how many OKI
+// channels were playing.
 
 #include "Vkaneko_gtmr.h"
+#include "Vbridge.h"
 #include "Vkaneko_gtmr___024root.h"
 #include "verilated.h"
 
@@ -81,6 +110,14 @@ int main(int argc, char** argv) {
     bool no_sprites = false;
     const char* rand_path = nullptr;
     const char* inputs_path = nullptr;
+    int save_frame = -1, load_frame = 30, after_frames = 300;
+    const char* save_path = nullptr;
+    const char* load_path = nullptr;
+    const char* resave_path = nullptr;
+    const char* save2_path = nullptr;
+    int save2_frame = -1;
+    bool pocket = false, p_reset = false, p_menu = false, crc_all = false;
+    int p_period = 75;
     for (int i = 5; i < argc; i++) {
         if (!strcmp(argv[i], "--fb-lat") && i + 1 < argc)       fb_lat  = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--rom-lat") && i + 1 < argc) rom_lat = atoi(argv[++i]);
@@ -92,6 +129,17 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--no-sprites"))               no_sprites = true;
         else if (!strcmp(argv[i], "--rand-from") && i + 1 < argc) rand_path = argv[++i];
         else if (!strcmp(argv[i], "--inputs") && i + 1 < argc)   inputs_path = argv[++i];
+        else if (!strcmp(argv[i], "--state-save") && i + 2 < argc) { save_frame = atoi(argv[++i]); save_path = argv[++i]; }
+        else if (!strcmp(argv[i], "--state-load") && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--load-at") && i + 1 < argc)  load_frame = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--resave") && i + 1 < argc)   resave_path = argv[++i];
+        else if (!strcmp(argv[i], "--save2") && i + 2 < argc)    { save2_frame = atoi(argv[++i]); save2_path = argv[++i]; }
+        else if (!strcmp(argv[i], "--after") && i + 1 < argc)    after_frames = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pocket"))                    pocket = true;
+        else if (!strcmp(argv[i], "--crc"))                       crc_all = true;
+        else if (!strcmp(argv[i], "--pocket-period") && i + 1 < argc) p_period = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pocket-reset"))              p_reset = true;
+        else if (!strcmp(argv[i], "--pocket-menu"))               p_menu = true;
         else {
             std::string s = argv[i];
             size_t p = 0;
@@ -137,11 +185,27 @@ int main(int argc, char** argv) {
     t->dl_wr = 0;
 
     uint64_t cyc = 0;
+    Vbridge* br = nullptr;
     auto tick = [&]() {
+        if (br) {
+            // the window between them, as each stood before this edge
+            br->ss_status = t->ss_status; br->ss_loading = t->ss_loading;
+            br->ss_refused = t->ss_refused; br->ss_do = t->ss_do; br->rom_loaded = t->rom_loaded;
+            t->ss_save = br->ss_save; t->ss_go = br->ss_go; t->ss_addr = br->ss_addr;
+            t->ss_rd = br->ss_rd; t->ss_wr = br->ss_wr; t->ss_di = br->ss_di;
+            br->clk = 0; br->eval();
+        }
         t->clk = 0; t->eval();
         t->clk = 1; t->eval();
+        if (br) { br->clk = 1; br->eval(); }
         cyc++;
     };
+    if (pocket) {
+        br = new Vbridge;
+        br->clk_74a = 0; br->clk = 0; br->bridge_endian_little = 0; br->reset_n = 1;
+        br->bridge_rd = 0; br->bridge_wr = 0; br->savestate_start = 0; br->savestate_load = 0;
+        br->eval();
+    }
 
     // Power-on: a few clocks of reset, then the EEPROM image (all ones, as an
     // erased 93C46), then the sprite region through the snoop.
@@ -235,6 +299,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "inputs: %zu steps from %s\n", plan.size(), inputs_path);
     }
     uint8_t p1v = 0, coinv = 0, startv = 0;
+    int plan_offset = 0;          // a loaded run: its frames against the saving run's
     auto apply_inputs = [&](int fr) {
         while (plan_i < plan.size() && plan[plan_i].frame <= fr) {
             const Step& st = plan[plan_i++];
@@ -266,13 +331,245 @@ int main(int argc, char** argv) {
 
     // Bus trace, in tools/mame_gtmr_bus_trace.lua's format: one line per
     // 68000 bus cycle, at the clock DTACK is first asserted.
-    FILE* trace = trace_path ? fopen(trace_path, "w") : nullptr;
+    // (with a save state, from the clock it lets go, so two runs line up)
+    FILE* trace = (trace_path && !save_path && !load_path) ? fopen(trace_path, "w") : nullptr;
     long traced = 0;
     bool dtack_prev = false;
     uint64_t bus_cycles = 0, as_clocks = 0, bus_cycles_f = 0, as_clocks_f = 0;
     bool as_prev = false;
 
+    // ------------------------------------------------------- save states
+    const int NW = 0x2C000;       // the file, in words
+    std::vector<uint16_t> sbuf(NW, 0);
+    enum { W_IDLE, W_ASK, W_ASKWAIT, W_READ, W_GO, W_GOWAIT, W_WRITE, W_LGO, W_LWAIT, W_DONE } wst = W_IDLE;
+    int wk = 0, wc = 0;
+    int reading_resave = 0;       // 1 the load's read-back, 2 --save2
+    if (load_path) {
+        FILE* f = fopen(load_path, "rb");
+        if (!f) { perror(load_path); return 1; }
+        std::vector<uint8_t> b(NW * 2, 0);
+        size_t n = fread(b.data(), 1, b.size(), f);
+        fclose(f);
+        if (n != b.size()) fprintf(stderr, "state: %s is %zu bytes, not %d\n", load_path, n, NW * 2);
+        for (int k = 0; k < NW; k++) sbuf[k] = (uint16_t)(b[2 * k] << 8 | b[2 * k + 1]);
+    }
+    int lg_saved = -1;            // the saving run's frame at its let-go
+    if (load_path) {
+        std::string tb = std::string(load_path) + ".tb";
+        FILE* f = fopen(tb.c_str(), "r");
+        if (f) { if (fscanf(f, "%d", &lg_saved) != 1) lg_saved = -1; fclose(f); }
+    }
+    auto crc_add = [](uint32_t c, const uint8_t* p, size_t n) {
+        c = ~c;
+        for (size_t i = 0; i < n; i++) {
+            c ^= p[i];
+            for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1)));
+        }
+        return ~c;
+    };
+    FILE* after = nullptr;
+    int after_k = 0;
+    uint32_t snd_crc = 0, snd_crc_all = 0;
+    FILE* crcf = crc_all ? fopen((outdir + "/crc.txt").c_str(), "w") : nullptr;
+    unsigned frz_busy = 0;
+    auto write_state = [&](const char* path) {
+        FILE* f = fopen(path, "wb");
+        if (!f) { perror(path); exit(1); }
+        for (int k = 0; k < NW; k++) { uint8_t b2[2] = { (uint8_t)(sbuf[k] >> 8), (uint8_t)sbuf[k] }; fwrite(b2, 1, 2, f); }
+        fclose(f);
+        unsigned pc = (unsigned)sbuf[0x62] << 16 | sbuf[0x63];
+        fprintf(stderr, "state: %s: froze in frame %u, line %u, dot %u, PC %06x%s, OKI channels playing %d+%d\n",
+                path, (unsigned)sbuf[0x0f] | (unsigned)sbuf[0x0e] << 16, sbuf[0x20], sbuf[0x21], pc,
+                sbuf[0x68] ? " (STOP)" : "", __builtin_popcount(frz_busy & 15), __builtin_popcount((frz_busy >> 4) & 15));
+    };
+    uint64_t letgo_cyc = 0;
+    auto let_go = [&]() {
+        letgo_cyc = cyc;
+        std::string ap = outdir + "/after.txt";
+        after = fopen(ap.c_str(), "w");
+        after_k = 0; snd_crc = 0;
+        frames = frame + after_frames;
+        fprintf(stderr, "state: let go at frame %d, clock %llu\n", frame, (unsigned long long)cyc);
+        if (trace_path && !trace && (!resave_path || reading_resave || !load_path)) trace = fopen(trace_path, "w");
+        if (save_path && !load_path) {
+            std::string tb = std::string(save_path) + ".tb";
+            FILE* f = fopen(tb.c_str(), "w");
+            fprintf(f, "%d\n", frame);
+            fclose(f);
+        }
+        if (load_path && lg_saved >= 0) {
+            plan_i = 0; p1v = 0; coinv = 0; startv = 0;
+            t->p1 = 0; t->coin = 0; t->start = 0; t->pause = 0; t->hide_speed_lines = 0;
+            plan_offset = lg_saved - frame;
+            apply_inputs(lg_saved);
+        }
+        wst = W_DONE;
+    };
+
+    // ---- --pocket: the bridge's side, on clk_74a
+    enum { P_IDLE, P_ACK, P_POLL, P_DELAY, P_READ, P_STALL, P_WRITE, P_LRESET, P_LACK, P_LPOLL, P_WAITGO, P_DONE } ps = P_IDLE;
+    const long FILE_BYTES = NW * 2, P_CHUNK = 4096, P_STALL_CLKS = 40000;
+    long pa = 0, pt = 0, pchunk_end = 0;
+    bool pfirst = true, p_resave = false, p_reset_n = true;
+    double pphase = 0;
+    std::vector<uint8_t> pfile;
+    auto p_clock = [&]() {
+        br->bridge_rd = 0; br->bridge_wr = 0;
+        switch (ps) {
+        case P_IDLE:
+            if (save_path && !load_path && frame >= save_frame) {
+                br->savestate_start = 1; ps = P_ACK; p_resave = false;
+                fprintf(stderr, "state: Savestate Start at frame %d\n", frame);
+            } else if (load_path && frame >= load_frame) {
+                pa = 0; pt = 0; pchunk_end = P_CHUNK;
+                if (p_reset) { p_reset_n = false; br->reset_n = 0; }
+                ps = P_WRITE;
+            }
+            break;
+        case P_ACK:
+            if (br->savestate_start_ack) { br->savestate_start = 0; ps = P_POLL; }
+            break;
+        case P_POLL:
+            if (br->savestate_start_err) { fprintf(stderr, "state: Savestate Start answered an error\n"); exit(1); }
+            if (br->savestate_start_ok) {
+                frz_busy = R.kaneko_gtmr__DOT__dbg_oki_busy;
+                pfile.assign(FILE_BYTES, 0); pa = 0; pt = 0; pfirst = true; pchunk_end = P_CHUNK;
+                ps = P_DELAY;
+            }
+            break;
+        case P_DELAY:
+            if (++pt == 20000) { pt = 0; ps = P_READ; }
+            break;
+        case P_READ:
+            // a pair: its address, the bus's value a few clocks on (what the
+            // read before fetched), then this read's strobe
+            if (pt == 0) br->bridge_addr = 0x40000000 + pa;
+            if (pt == 4 && !pfirst) {
+                uint32_t d = br->bridge_rd_data; long o = pa - 4;
+                pfile[o] = d >> 24; pfile[o + 1] = d >> 16; pfile[o + 2] = d >> 8; pfile[o + 3] = d;
+            }
+            if (pt == 5) br->bridge_rd = 1;
+            if (++pt == p_period) {
+                pt = 0; pfirst = false;
+                if (pa >= FILE_BYTES) {
+                    for (int k = 0; k < NW; k++) sbuf[k] = (uint16_t)(pfile[2 * k] << 8 | pfile[2 * k + 1]);
+                    write_state(p_resave ? resave_path : save_path);
+                    ps = P_WAITGO;
+                }
+                else if (pa == pchunk_end) { ps = P_STALL; pt = 0; }
+                else pa += 4;
+            }
+            break;
+        case P_STALL:
+            // a chunk gone to the card: the next starts with the pair just read, again
+            if (++pt >= P_STALL_CLKS) { pt = 0; pfirst = true; pchunk_end += P_CHUNK; ps = P_READ; }
+            break;
+        case P_WRITE:
+            if (pt == 0) {
+                br->bridge_addr = 0x40000000 + pa;
+                br->bridge_wr_data = (uint32_t)(sbuf[pa / 2] << 16 | sbuf[pa / 2 + 1]);
+            }
+            if (pt == 5) br->bridge_wr = 1;
+            if (++pt == p_period) {
+                pt = 0; pa += 4;
+                if (pa == FILE_BYTES) { ps = p_reset ? P_LRESET : P_LACK; br->savestate_load = p_reset ? 0 : 1; }
+                else if (pa == pchunk_end) { pchunk_end += P_CHUNK; pt = -P_STALL_CLKS; }
+            }
+            break;
+        case P_LRESET:
+            // the Pocket's reset let go before Savestate Load
+            if (++pt == 2000) { p_reset_n = true; br->reset_n = 1; }
+            if (pt == 4000) { pt = 0; br->savestate_load = 1; ps = P_LACK; }
+            break;
+        case P_LACK:
+            if (br->savestate_load_ack) { br->savestate_load = 0; ps = P_LPOLL; }
+            break;
+        case P_LPOLL:
+            if (br->savestate_load_err) { fprintf(stderr, "state: Savestate Load answered an error; the game goes on\n"); ps = P_DONE; }
+            else if (br->savestate_load_ok) {
+                if (resave_path) { br->savestate_start = 1; ps = P_ACK; p_resave = true; }
+                else ps = P_WAITGO;
+            }
+            break;
+        default: break;
+        }
+        br->clk_74a = 1; br->eval();
+        br->clk_74a = 0; br->eval();
+    };
+    bool p_letgo_seen = false;
+
     while (frame < frames) {
+        if (br) {
+            for (pphase += 74.25 / 48.0; pphase >= 1; pphase -= 1) p_clock();
+            // the board's reset and pause as core_top makes them
+            if (p_reset) t->rst = !p_reset_n && !br->hold_reset;
+            // (the menu open from 5 frames before the save until it has let go)
+            if (p_menu) t->pause = (save_path && !load_path && frame >= save_frame - 5 && !p_letgo_seen) && !br->pause_lift;
+            if (ps == P_WAITGO && t->ss_status == 0 && !p_letgo_seen) { p_letgo_seen = true; let_go(); ps = P_DONE; }
+        }
+        // ---- the state window, a clock at a time
+        if (!br) { t->ss_save = 0; t->ss_go = 0; t->ss_rd = 0; t->ss_wr = 0; }
+        if (!br) switch (wst) {
+        case W_IDLE:
+            if (save_path && frame >= save_frame) { wst = W_ASK; reading_resave = 0; }
+            else if (load_path && frame >= load_frame) { wst = W_WRITE; wk = 0; wc = 0; }
+            break;
+        case W_ASK:
+            t->ss_save = 1; wc = 0; wst = W_ASKWAIT; break;
+        case W_ASKWAIT:
+            if (++wc < 12) break;
+            if (t->ss_status == 3) { fprintf(stderr, "state: the save found no point (error)\n"); return 1; }
+            if (t->ss_status == 2) { frz_busy = R.kaneko_gtmr__DOT__dbg_oki_busy; wst = W_READ; wk = 0; wc = 0; }
+            break;
+        case W_READ:
+            if (wc == 0) {
+                if (wk > 0) sbuf[wk - 1] = t->ss_do;
+                if (wk == NW) {
+                    write_state(reading_resave == 2 ? save2_path : reading_resave ? resave_path : save_path);
+                    if (t->ss_status == 3) { fprintf(stderr, "state: error while reading\n"); return 1; }
+                    wst = W_GO; break;
+                }
+                t->ss_addr = wk; t->ss_rd = 1;
+            }
+            if (++wc == 20) { wc = 0; wk++; }
+            break;
+        case W_GO:
+            t->ss_go = 1; wc = 0; wst = W_GOWAIT; break;
+        case W_GOWAIT:
+            if (++wc < 4) break;
+            if (t->ss_status == 3) { fprintf(stderr, "state: error at the let-go\n"); return 1; }
+            if (t->ss_status == 0) let_go();
+            break;
+        case W_WRITE:
+            if (wc == 0) {
+                if (wk == 20 && !t->ss_loading) {
+                    fprintf(stderr, "state: %s refused%s; the game goes on\n", load_path, t->ss_refused ? " (header)" : "");
+                    wst = W_DONE; break;
+                }
+                if (wk == NW) { wst = W_LGO; wc = 0; break; }
+                t->ss_addr = wk; t->ss_di = sbuf[wk]; t->ss_wr = 1;
+            }
+            if (++wc == 20) { wc = 0; wk++; }
+            break;
+        case W_LGO:
+            if (++wc < 20) break;
+            t->ss_go = 1; wc = 0; wst = W_LWAIT; break;
+        case W_LWAIT:
+            if (++wc < 4) break;
+            if (t->ss_status == 3) { fprintf(stderr, "state: the load failed (error)\n"); return 1; }
+            if (resave_path && t->ss_status == 2) {
+                frz_busy = R.kaneko_gtmr__DOT__dbg_oki_busy;
+                reading_resave = 1; wst = W_ASK; break;
+            }
+            if (t->ss_status == 0) let_go();
+            break;
+        case W_DONE:
+            // --save2 F FILE: another save at frame F after the let-go (what has drifted)
+            if (save2_path && after && frame >= save2_frame) { wst = W_ASK; reading_resave = 2; save2_frame = 1 << 30; }
+            break;
+        default: break;
+        }
+
         // ---- inputs for the next edge, from the outputs of the last one
         uint32_t req = t->rom_req;
         uint32_t ack = 0;
@@ -355,6 +652,11 @@ int main(int argc, char** argv) {
         }
 
         tick();
+        if (after || crcf) {
+            uint16_t sv = t->snd; uint8_t b2[2] = { (uint8_t)sv, (uint8_t)(sv >> 8) };
+            if (after) snd_crc = crc_add(snd_crc, b2, 2);
+            if (crcf) snd_crc_all = crc_add(snd_crc_all, b2, 2);
+        }
 
         {
             bool run = R.kaneko_gtmr__DOT__u_line__DOT__running;
@@ -395,7 +697,10 @@ int main(int argc, char** argv) {
                     uint32_t ds = R.kaneko_gtmr__DOT__dbg_ds;
                     uint32_t d  = rd ? R.kaneko_gtmr__DOT__dbg_din : R.kaneko_gtmr__DOT__dbg_dout;
                     uint32_t m  = (ds == 3) ? 0xffff : (ds == 2) ? 0xff00 : 0x00ff;
-                    fprintf(trace, "%06x %c %04x %04x\n", a, rd ? 'R' : 'W', d & m, m);
+                    if (save_path || load_path)   // (a save state's: the clock from the let-go too)
+                        fprintf(trace, "%06x %c %04x %04x %llu\n", a, rd ? 'R' : 'W', d & m, m, (unsigned long long)(cyc - letgo_cyc));
+                    else
+                        fprintf(trace, "%06x %c %04x %04x\n", a, rd ? 'R' : 'W', d & m, m);
                     if (++traced >= trace_count && trace_count > 0) { fclose(trace); trace = nullptr; }
                 }
             }
@@ -449,8 +754,18 @@ int main(int argc, char** argv) {
                 max_wait = 0; max_wait_addr = 0; hold_clocks = 0;
                 fflush(stats);
                 if (frame % 10 == 0) { fprintf(stderr, "frame %d  cycles %llu\n", frame, (unsigned long long)cyc); }
+                if (crcf) {
+                    fprintf(crcf, "%d %08x %08x\n", frame, crc_add(0, img.data(), img.size()), snd_crc_all);
+                    snd_crc_all = 0;
+                }
+                if (after) {
+                    uint32_t pc = crc_add(0, img.data(), img.size());
+                    fprintf(after, "%d %08x %08x\n", after_k++, pc, snd_crc);
+                    snd_crc = 0;
+                    fflush(after);
+                }
                 frame++;
-                apply_inputs(frame);
+                apply_inputs(frame + plan_offset);
                 y = 0; x = 0;
             }
             prev_hb = hb; prev_vb = vb;
@@ -458,6 +773,8 @@ int main(int argc, char** argv) {
     }
 
     fclose(stats);
+    if (after) fclose(after);
+    if (crcf) fclose(crcf);
     t->final();
     delete t;
     return 0;

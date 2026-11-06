@@ -50,7 +50,11 @@ module kaneko_irq #(
 
     output wire [2:0] ipl_n,       // to fx68k IPL2n:IPL0n, active low
     output wire       vpa_n,       // to fx68k VPAn, active low
-    output wire       iack         // CPU space cycle in progress
+    output wire       iack,        // CPU space cycle in progress
+    // Save states: the three latches, {pend5, pend4, pend3}
+    output wire [2:0] ss_q,
+    input  wire       ss_we,
+    input  wire [2:0] ss_d
 );
 
     // A scanline has started when the counter moves. Derived here rather than
@@ -91,6 +95,7 @@ module kaneko_irq #(
                     default: ;   // no other level is ever raised here
                 endcase
             end
+            if (ss_we) {pend5, pend4, pend3} <= ss_d;
         end
     end
 
@@ -103,5 +108,6 @@ module kaneko_irq #(
     // Asserted ONLY during the acknowledge: VPAn low in a normal cycle turns it
     // into a synchronous 6800-style cycle and the bus stops making sense.
     assign vpa_n = ~iack;
+    assign ss_q  = {pend5, pend4, pend3};
 
 endmodule

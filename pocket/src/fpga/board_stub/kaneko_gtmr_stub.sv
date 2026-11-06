@@ -89,6 +89,7 @@ module kaneko_gtmr #(
     input  wire        service, test,
     input  wire [15:0] dsw,
     input  wire        pause,
+    input  wire        hide_speed_lines,
 
     input  wire [5:0]  nv_addr,
     input  wire [15:0] nv_din,
@@ -103,11 +104,23 @@ module kaneko_gtmr #(
     output wire [23:0] diag_wait_addr,
     output wire [15:0] diag_stall_frames,
     output wire [15:0] diag_draw_max,
-    output wire [7:0]  diag_spr_overruns
+    output wire [7:0]  diag_spr_overruns,
+
+    input  wire        ss_save,
+    input  wire        ss_go,
+    output wire [1:0]  ss_status,
+    output wire        ss_loading,
+    output wire        ss_refused,
+    input  wire [17:0] ss_addr,
+    input  wire        ss_rd,
+    output wire [15:0] ss_do,
+    input  wire        ss_wr,
+    input  wire [15:0] ss_di
 );
 assign diag_wait_max = 32'd0; assign diag_wait_addr = 24'd0;
 assign diag_stall_frames = 16'd0; assign diag_draw_max = 16'd0;
 assign diag_spr_overruns = 8'd0;
+assign ss_status = 2'd3; assign ss_loading = 1'b0; assign ss_refused = 1'b1; assign ss_do = 16'd0;   // no save states
 wire unused_diag_clr = diag_clr;
 
 // ------------------------------------------------------------------ video

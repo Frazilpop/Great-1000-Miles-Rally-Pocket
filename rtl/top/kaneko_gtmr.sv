@@ -104,7 +104,19 @@ module kaneko_gtmr #(
     output wire [23:0] diag_wait_addr,     // its byte address
     output wire [15:0] diag_stall_frames,  // frames with fewer than 8192 bus cycles
     output wire [15:0] diag_draw_max,      // longest KC-002 draw, clocks / 64
-    output wire [7:0]  diag_spr_overruns   // KC-002 draws that missed their swap
+    output wire [7:0]  diag_spr_overruns,  // KC-002 draws that missed their swap
+
+    // Save states: kaneko_state's window (see there)
+    input  wire        ss_save,
+    input  wire        ss_go,
+    output wire [1:0]  ss_status,
+    output wire        ss_loading,
+    output wire        ss_refused,
+    input  wire [17:0] ss_addr,
+    input  wire        ss_rd,
+    output wire [15:0] ss_do,
+    input  wire        ss_wr,
+    input  wire [15:0] ss_di
 );
 
 // ================================================================ game table
@@ -135,7 +147,13 @@ wire       ce_pix_i = (ce_div == 3'd0);
 // ================================================================ resets
 // Held until the ROM is in SDRAM: fetching earlier reads whatever the memory
 // powered up with as reset vectors.
-wire cpu_rst = rst | ~rom_loaded;
+//
+// A load resets what it then writes (ss_sysrst), and holds the 68000 in
+// extReset, but not the OKIs, whose whole state it writes by their chain, nor
+// the 68000's register file (pwrUp clears it).
+wire cpu_rst_real = rst | ~rom_loaded;
+wire ss_sysrst, ss_rst68;
+wire cpu_rst = cpu_rst_real | ss_sysrst;
 
 // The raster lets go of reset only on one phase of the 24-clock counter, so
 // on every launch hcnt steps at the same oki_div and a state's raster
@@ -170,11 +188,16 @@ always @(posedge clk) begin
         else if (ASn)          cpu_hold <= 1'b1;
     end
 end
-wire enPhi1 = (cpu_ph == 2'd0) & ~cpu_hold;
-wire enPhi2 = (cpu_ph == 2'd1) & ~cpu_hold;
+// A save state's freeze withholds them as well, but for a load's own runs of
+// the 68000 alone (ss_run68). The freeze rises and falls on oki_div 14, a
+// cpu_ph 2, so here too the last enable is a phi2 and the next a phi1.
+wire ss_freeze, ss_run68, ss_okirun;
+wire cpu_stop = cpu_hold | (ss_freeze & ~ss_run68);
+wire enPhi1 = (cpu_ph == 2'd0) & ~cpu_stop;
+wire enPhi2 = (cpu_ph == 2'd1) & ~cpu_stop;
 
 // OKIs: 16 MHz / 8 = 2 MHz, i.e. 48 / 24 (oki_div, above).
-wire oki_cen = (oki_div == 5'd0) & ~cpu_hold;
+wire oki_cen = (oki_div == 5'd0) & ~cpu_hold & ~(ss_freeze & ~ss_okirun);
 
 // ================================================================ timing
 wire [9:0] hcnt, vcnt;
@@ -199,10 +222,19 @@ wire [2:0]  cpu_fc;
 wire [2:0]  cpu_ipl_n;
 wire        cpu_vpa_n, cpu_iack;
 
+wire        fx_atstart, fx_atdisp, fx_busidle;
+wire [9:0]  fx_uaddr;
+wire [31:0] fx_regq, fx_pc, fx_regd;
+wire [15:0] fx_sr, fx_misc, fx_grpdisp, fx_clk;
+wire [4:0]  fx_rega;
+wire        fx_regwe, fx_srwe, fx_miscwe, fx_grpwe, fx_clkwe;
+wire [15:0] fx_srd, fx_miscd, fx_grpd, fx_clkd;
+wire        ss_park68, ss_parkdisp68;
+
 fx68k u_cpu
 (
     .clk(clk), .HALTn(1'b1),
-    .extReset(cpu_rst), .pwrUp(cpu_rst),
+    .extReset(cpu_rst_real | ss_rst68), .pwrUp(cpu_rst_real),
     .enPhi1(enPhi1), .enPhi2(enPhi2),
     .eRWn(eRWn), .ASn(ASn), .LDSn(LDSn), .UDSn(UDSn),
     .E(), .VMAn(), .FC0(cpu_fc[0]), .FC1(cpu_fc[1]), .FC2(cpu_fc[2]),
@@ -210,7 +242,17 @@ fx68k u_cpu
     .DTACKn(DTACKn), .VPAn(cpu_vpa_n), .BERRn(1'b1),
     .BRn(1'b1), .BGACKn(1'b1),
     .IPL0n(cpu_ipl_n[0]), .IPL1n(cpu_ipl_n[1]), .IPL2n(cpu_ipl_n[2]),
-    .iEdb(iEdb), .oEdb(oEdb), .eab(eab)
+    .iEdb(iEdb), .oEdb(oEdb), .eab(eab),
+    .ssPark(ss_park68), .ssParkDisp(ss_parkdisp68),
+    .ssAtStart(fx_atstart), .ssAtDisp(fx_atdisp), .ssBusIdle(fx_busidle),
+    .ssUaddr(fx_uaddr),
+    .ssRegA(fx_rega), .ssRegQ(fx_regq), .ssRegWe(fx_regwe), .ssRegD(fx_regd),
+    .ssPc(fx_pc), .ssSr(fx_sr),
+    .ssMisc(fx_misc), .ssGrpDisp(fx_grpdisp), .ssClk(fx_clk),
+    .ssSrWe(fx_srwe), .ssSrD(fx_srd),
+    .ssMiscWe(fx_miscwe), .ssMiscD(fx_miscd),
+    .ssGrpWe(fx_grpwe), .ssGrpD(fx_grpd),
+    .ssClkWe(fx_clkwe), .ssClkD(fx_clkd)
 );
 
 // The bus as the simulation harness traces it (tools/pocket/diff_gtmr_trace.py
@@ -235,16 +277,21 @@ wire [1:0]  dbg_ds    /*verilator public_flat_rd*/ = {~UDSn, ~LDSn};
 // Paused, the interrupt block sees the scanline stand still, so no level is
 // raised for the lines that pass: the game resumes where it stopped instead of
 // taking a pile of stale interrupts back to back. Unpaused it is vcnt itself.
+// A save state's freeze holds it too, the whole of a load included.
+wire        irq_hold = cpu_hold | ss_freeze;
 logic [9:0] vcnt_frz;
-always_ff @(posedge clk) if (!cpu_hold) vcnt_frz <= vcnt;
-wire  [9:0] irq_vcnt = cpu_hold ? vcnt_frz : vcnt;
+always_ff @(posedge clk) if (!irq_hold) vcnt_frz <= vcnt;
+wire  [9:0] irq_vcnt = irq_hold ? vcnt_frz : vcnt;
+wire  [2:0] irq_ss_q;
+wire        irq_ss_we;
 
 kaneko_irq #(.LINE_IRQ4(`GTMR_IRQ4_LINE), .LINE_IRQ3(`GTMR_IRQ3_LINE)) u_irq
 (
     .clk(clk), .rst(cpu_rst),
     .vcnt(irq_vcnt),
     .fc(cpu_fc), .as(~ASn), .a_level(eab[3:1]),
-    .ipl_n(cpu_ipl_n), .vpa_n(cpu_vpa_n), .iack(cpu_iack)
+    .ipl_n(cpu_ipl_n), .vpa_n(cpu_vpa_n), .iack(cpu_iack),
+    .ss_q(irq_ss_q), .ss_we(irq_ss_we), .ss_d(aux_d[2:0])
 );
 
 // ================================================================ speed lines
@@ -275,7 +322,12 @@ always_ff @(posedge clk)
     spdl_hit <= hide_speed_lines && (cpu_fc[1:0] == 2'b10) &&
                 (eab == spdl_a0 || eab == spdl_a1);
 
-assign iEdb = spdl_hit ? 16'hffff : bus_iEdb;
+// A load's restore answers the 68000's reset vectors from the state.
+wire        ss_vec;
+wire [31:0] ss_vec_sp, ss_vec_pc;
+wire [15:0] vec_word = (eab[2:1] == 2'd0) ? ss_vec_sp[31:16] : (eab[2:1] == 2'd1) ? ss_vec_sp[15:0]
+                     : (eab[2:1] == 2'd2) ? ss_vec_pc[31:16] : ss_vec_pc[15:0];
+assign iEdb = (ss_vec && eab[23:3] == 21'd0) ? vec_word : spdl_hit ? 16'hffff : bus_iEdb;
 
 // ================================================================ bus
 wire        bus_rom_req;  wire [SDR_AW:1] bus_rom_addr;
@@ -297,11 +349,25 @@ wire        hit_we;       wire [5:0] hit_addr; wire [15:0] hit_q;
 wire [15:0] disp_enable;
 wire [15:0] in_p1, in_p2, in_sys, in_unk;
 
+// The bus as the 68000 drives it, or as a save state does (word cycles,
+// with the 68000 parked or in reset). Everything that takes the 68000's
+// strobes or data takes these.
+wire        ss_bus, ss_as, ss_rw;
+wire [23:1] ss_a;
+wire [15:0] ss_d;
+wire [23:1] b_eab  = ss_bus ? ss_a   : eab;
+wire        b_ASn  = ss_bus ? ~ss_as : ASn;
+wire        b_UDSn = ss_bus ? ~ss_as : UDSn;
+wire        b_LDSn = ss_bus ? ~ss_as : LDSn;
+wire        b_eRWn = ss_bus ? ss_rw  : eRWn;
+wire [15:0] b_oEdb = ss_bus ? ss_d   : oEdb;
+wire        bus_idle, ss_cinval, de_we;
+
 kaneko_gtmr_bus #(.SDR_AW(SDR_AW)) u_bus
 (
     .clk(clk), .rst(cpu_rst), .map2(map2),
-    .eab(eab), .ASn(ASn), .LDSn(LDSn), .UDSn(UDSn), .eRWn(eRWn),
-    .oEdb(oEdb), .iEdb(bus_iEdb), .DTACKn(DTACKn), .cpu_space(cpu_iack),
+    .eab(b_eab), .ASn(b_ASn), .LDSn(b_LDSn), .UDSn(b_UDSn), .eRWn(b_eRWn),
+    .oEdb(b_oEdb), .iEdb(bus_iEdb), .DTACKn(DTACKn), .cpu_space(cpu_iack & ~ss_bus),
 
     .rom_req(bus_rom_req), .rom_addr(bus_rom_addr),
     .rom_ack(rom_ack[4] & ~mcu_busy), .rom_dout(rom_dout[4]),
@@ -329,7 +395,8 @@ kaneko_gtmr_bus #(.SDR_AW(SDR_AW)) u_bus
     .hit_we(hit_we), .hit_addr(hit_addr), .hit_q(hit_q),
 
     .in_p1(in_p1), .in_p2(in_p2), .in_sys(in_sys), .in_unk(in_unk),
-    .disp_enable(disp_enable), .unmapped_hit()
+    .disp_enable(disp_enable), .unmapped_hit(),
+    .idle(bus_idle), .cinval(ss_cinval), .de_we(de_we), .de_d(aux_d)
 );
 
 // ================================================================ TOYBOX
@@ -337,6 +404,8 @@ wire        mcu_ram_req, mcu_ram_we;
 wire [14:0] mcu_ram_addr;  wire [15:0] mcu_ram_din;  wire [1:0] mcu_ram_be;
 wire        mcu_rom_req;   wire [SDR_AW:1] mcu_rom_addr;
 wire        ee_we, ee_dirty_set;
+wire [63:0] com_q;
+wire        com_we_ss;
 wire [5:0]  ee_addr;       wire [15:0] ee_din, ee_dout;
 
 kaneko_toybox #(.SDR_AW(SDR_AW)) u_toybox
@@ -352,7 +421,8 @@ kaneko_toybox #(.SDR_AW(SDR_AW)) u_toybox
     .rom_ack(rom_ack[4] & mcu_busy), .rom_dout(rom_dout[4]),
     .ee_we(ee_we), .ee_addr(ee_addr), .ee_din(ee_din), .ee_dout(ee_dout),
     .ee_dirty_set(ee_dirty_set),
-    .dsw(dsw)
+    .dsw(dsw),
+    .ss_com_q(com_q), .ss_com_we(com_we_ss), .ss_com_sel(2'(aux_i - 5'd7)), .ss_com_d(aux_d)
 );
 
 // The 68000 is parked in the bus's S_MCU while the MCU runs, so it has no
@@ -372,10 +442,17 @@ wire [SDR_AW:1]   p4_addr = mcu_busy ? mcu_rom_addr : bus_rom_addr;
 // running commands 02 and 42. One write port, chosen by who is writing.
 logic [15:0] ee_mem [0:63];
 logic [15:0] ee_q, nv_q;
+// A save state takes TOYBOX's side, idle then.
+wire        ss_ee, ss_ee_we;
+wire [5:0]  ss_ee_a;
+wire [15:0] ss_ee_d;
+wire [5:0]  ee_a_m  = ss_ee ? ss_ee_a  : ee_addr;
+wire        ee_we_m = ss_ee ? ss_ee_we : ee_we;
+wire [15:0] ee_d_m  = ss_ee ? ss_ee_d  : ee_din;
 always_ff @(posedge clk) begin
-    if (nv_we)      ee_mem[nv_addr] <= nv_din;
-    else if (ee_we) ee_mem[ee_addr] <= ee_din;
-    ee_q <= ee_mem[ee_addr];
+    if (nv_we)        ee_mem[nv_addr] <= nv_din;
+    else if (ee_we_m) ee_mem[ee_a_m] <= ee_d_m;
+    ee_q <= ee_mem[ee_a_m];
     nv_q <= ee_mem[nv_addr];
 end
 assign ee_dout = ee_q;
@@ -384,7 +461,7 @@ assign nv_dout = nv_q;
 logic nv_dirty_r;
 always_ff @(posedge clk) begin
     if (rst_por)           nv_dirty_r <= 1'b0;
-    else if (ee_dirty_set) nv_dirty_r <= 1'b1;
+    else if (ee_dirty_set || (ss_ee && ss_ee_we)) nv_dirty_r <= 1'b1;
     else if (nv_dirty_clr) nv_dirty_r <= 1'b0;
 end
 assign nv_dirty = nv_dirty_r;
@@ -393,7 +470,12 @@ assign nv_dirty = nv_dirty_r;
 // gtmr only reads its random number (kaneko16.cpp: "only used for random
 // number"). A free-running LFSR stands in for machine().rand().
 logic [15:0] lfsr;
-always_ff @(posedge clk) lfsr <= rst_por ? 16'hace1 : {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+wire  lfsr_we;
+always_ff @(posedge clk)
+    lfsr <= rst_por   ? 16'hace1 :
+            lfsr_we   ? aux_d :
+            ss_freeze ? lfsr :
+                        {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
 
 // The harness can replay MAME's own random numbers, so a bus trace can be
 // compared past the first time the game rolls a die.
@@ -409,7 +491,7 @@ kaneko_hit u_hit
 (
     .clk(clk), .rst(cpu_rst),
     .addr(hit_addr), .din(reg_din), .we(hit_we),
-    .uds(~UDSn), .lds(~LDSn),
+    .uds(~b_UDSn), .lds(~b_LDSn),
     .dout(hit_q), .rnd(rnd)
 );
 
@@ -433,7 +515,7 @@ kaneko_gtmr_vmem u_vmem
     .cpu_addr(vmem_addr), .cpu_din(vmem_din),
     .we_vram0(vram0_we), .we_vram1(vram1_we),
     .we_spr(spr_we), .we_pal(pal_we),
-    .uds(~UDSn), .lds(~LDSn),
+    .uds(~b_UDSn), .lds(~b_LDSn),
     .q_vram0(q_vram0), .q_vram1(q_vram1), .q_spr(q_spr), .q_pal(q_pal),
     .c0_t0_addr(c0_t0_addr), .c0_t0_q(c0_t0_q),
     .c0_t1_addr(c0_t1_addr), .c0_t1_q(c0_t1_q),
@@ -453,21 +535,21 @@ wire [255:0] v2r0_flat, v2r1_flat, sprreg_flat;
 kaneko_regs16 u_v2r0
 (
     .clk(clk), .we(v2r0_we), .addr(reg_addr), .din(reg_din),
-    .uds(~UDSn), .lds(~LDSn),
+    .uds(~b_UDSn), .lds(~b_LDSn),
     .rd_addr(reg_addr), .rd_q(q_v2r0), .regs_flat(v2r0_flat)
 );
 
 kaneko_regs16 u_v2r1
 (
     .clk(clk), .we(v2r1_we), .addr(reg_addr), .din(reg_din),
-    .uds(~UDSn), .lds(~LDSn),
+    .uds(~b_UDSn), .lds(~b_LDSn),
     .rd_addr(reg_addr), .rd_q(q_v2r1), .regs_flat(v2r1_flat)
 );
 
 kaneko_regs16 u_sprreg
 (
     .clk(clk), .we(sprreg_we), .addr(reg_addr), .din(reg_din),
-    .uds(~UDSn), .lds(~LDSn),
+    .uds(~b_UDSn), .lds(~b_LDSn),
     .rd_addr(reg_addr), .rd_q(q_sprreg), .regs_flat(sprreg_flat)
 );
 
@@ -495,13 +577,27 @@ wire [63:0] lay_sy_live = { c1r1, c1r3, c0r1, c0r3 };
 // beam shows that picture during the next frame. Latching at line 240 gives
 // every line of the next frame exactly those values -- including line 0,
 // which is rendered during line 263, before any "frame start" could latch.
-wire frame_start = vbl_rise;
+wire frame_start = vbl_rise & ~ss_freeze;
 
 reg [3:0]  lay_en, lay_ls;
 reg [63:0] lay_sx, lay_sy;
+wire       lay_we;
 always @(posedge clk) begin
     if (rst) begin
         lay_en <= 4'd0; lay_ls <= 4'd0; lay_sx <= 64'd0; lay_sy <= 64'd0;
+    end else if (lay_we) begin
+        case (aux_i)
+            5'd11: {lay_ls, lay_en} <= aux_d[7:0];
+            5'd12: lay_sx[63:48] <= aux_d;
+            5'd13: lay_sx[47:32] <= aux_d;
+            5'd14: lay_sx[31:16] <= aux_d;
+            5'd15: lay_sx[15:0]  <= aux_d;
+            5'd16: lay_sy[63:48] <= aux_d;
+            5'd17: lay_sy[47:32] <= aux_d;
+            5'd18: lay_sy[31:16] <= aux_d;
+            5'd19: lay_sy[15:0]  <= aux_d;
+            default: ;
+        endcase
     end else if (frame_start) begin
         lay_en <= lay_en_live;
         lay_ls <= lay_ls_live;
@@ -609,11 +705,22 @@ kaneko_kc002 #(.SDR_AW(SDR_AW)) u_spr
     .fb1_ack(fb1_ack), .fb1_rdata(fb1_rdata),
     .rd_x(screen_x),
     .spr_pix(spr_pix), .spr_prio(spr_prio),
-    .draw_clocks(spr_draw_clocks), .overruns(spr_overruns)
+    .draw_clocks(spr_draw_clocks), .overruns(spr_overruns),
+    .ss_freeze(ss_freeze), .ss_swap_full(kc_swap_full), .ss_draw_busy(kc_draw_busy),
+    .ss_disp(kc_disp), .ss_draw_snap_q(kc_draw_snap_q),
+    .ss_snap_en(kc_snap_en), .ss_snap_a(kc_snap_a), .ss_snap_we(kc_snap_we),
+    .ss_snap_d(kc_snap_d), .ss_snap_q(kc_snap_q),
+    .ss_draw(kc_draw), .ss_draw_disp(kc_draw_disp), .ss_draw_snap(kc_draw_snap)
 );
+
+wire        kc_swap_full, kc_draw_busy, kc_disp, kc_draw_snap_q;
+wire        kc_snap_en, kc_snap_we, kc_draw, kc_draw_disp, kc_draw_snap;
+wire [12:0] kc_snap_a;
+wire [15:0] kc_snap_d, kc_snap_q;
 
 // Read by the simulation harness; nothing on the board uses them.
 wire [15:0] spr_draw_clocks /*verilator public_flat_rd*/;
+wire [7:0]  dbg_oki_busy    /*verilator public_flat_rd*/ = {oki1_dout[3:0], oki0_dout[3:0]};
 wire [7:0]  spr_overruns    /*verilator public_flat_rd*/;
 
 // ================================================================ mixer
@@ -685,8 +792,10 @@ assign in_unk = 16'hff00;
 //   OKI 1: the whole 256 KB window banked, bank b at b * 0x40000, mask 1
 logic [3:0] okb0;
 logic       okb1;
+wire okb_we;
 always_ff @(posedge clk) begin
     if (cpu_rst) begin okb0 <= 4'd0; okb1 <= 1'b0; end
+    else if (okb_we) begin okb0 <= aux_d[3:0]; okb1 <= aux_d[4]; end
     else begin
         if (okib0_we) okb0 <= oki_din[3:0];
         if (okib1_we) okb1 <= oki_din[0];
@@ -722,20 +831,28 @@ kaneko_tilerom #(.NREQ(1), .SDR_AW(SDR_AW)) u_oki1rom
 );
 
 // PIN7 low: the sample-rate divider is 165, so 2 MHz gives 12.12 kHz.
+// A save state's chain runs through both: kaneko_state, OKI 1, OKI 0, back.
+wire       ss_scan, ss_gsh, ss_gi, oki1_go, oki0_go;
+wire [1:0] oki_quiet, oki_phase;
+
 jt6295 u_oki0
 (
-    .rst(cpu_rst), .clk(clk), .cen(oki_cen), .ss(1'b0),
+    .rst(cpu_rst_real), .clk(clk), .cen(oki_cen), .ss(1'b0),
     .wrn(~oki0_we), .din(oki_din), .dout(oki0_dout),
     .rom_addr(oki0_a), .rom_data(oki0_d), .rom_ok(oki0_ok),
-    .sound(oki0_snd), .sample()
+    .sound(oki0_snd), .sample(),
+    .ss_scan(ss_scan), .ss_gsh(ss_gsh), .ss_gi(oki1_go), .ss_go(oki0_go),
+    .ss_quiet(oki_quiet[0]), .ss_phase(oki_phase[0])
 );
 
 jt6295 u_oki1
 (
-    .rst(cpu_rst), .clk(clk), .cen(oki_cen), .ss(1'b0),
+    .rst(cpu_rst_real), .clk(clk), .cen(oki_cen), .ss(1'b0),
     .wrn(~oki1_we), .din(oki_din), .dout(oki1_dout),
     .rom_addr(oki1_a), .rom_data(oki1_d), .rom_ok(oki1_ok),
-    .sound(oki1_snd), .sample()
+    .sound(oki1_snd), .sample(),
+    .ss_scan(ss_scan), .ss_gsh(ss_gsh), .ss_gi(ss_gi), .ss_go(oki1_go),
+    .ss_quiet(oki_quiet[1]), .ss_phase(oki_phase[1])
 );
 
 // Each OKI is routed at 0.5 to one speaker. Summed, then doubled so a single
@@ -785,8 +902,8 @@ always_ff @(posedge clk) begin
         end
         if (vbl_rise) begin
             dg_cycles <= '0;
-            dg_armed  <= ~cpu_hold;   // the first frame after a clear or a pause is partial
-            if (dg_armed && !cpu_hold && dg_cycles < 16'd8192 && dg_stall_frames != 16'hffff)
+            dg_armed  <= ~irq_hold;   // the first frame after a clear, a pause or a save state is partial
+            if (dg_armed && !irq_hold && dg_cycles < 16'd8192 && dg_stall_frames != 16'hffff)
                 dg_stall_frames <= dg_stall_frames + 16'd1;
         end
         if (spr_draw_clocks > dg_draw_max) dg_draw_max <= spr_draw_clocks;
@@ -797,6 +914,67 @@ assign diag_wait_addr    = dg_wait_addr;
 assign diag_stall_frames = dg_stall_frames;
 assign diag_draw_max     = dg_draw_max;
 assign diag_spr_overruns = spr_overruns - dg_over_base;
+
+// ================================================================ save states
+// The board's own words in the file (0x46-0x67), aux 3-19.
+wire [15:0] aux_d;
+wire [4:0]  aux_i;
+wire        aux_we;
+wire [319:0] aux_q;
+assign aux_q[  0 +: 48] = '0;                       // 0-2: kaneko_state's own
+assign aux_q[ 48 +: 16] = disp_enable;
+assign aux_q[ 64 +: 16] = {11'd0, okb1, okb0};
+assign aux_q[ 80 +: 16] = {13'd0, irq_ss_q};
+assign aux_q[ 96 +: 16] = lfsr;
+assign aux_q[112 +: 64] = com_q;                    // com[0] first
+assign aux_q[176 +: 16] = {8'd0, lay_ls, lay_en};
+assign aux_q[192 +: 16] = lay_sx[63:48];
+assign aux_q[208 +: 16] = lay_sx[47:32];
+assign aux_q[224 +: 16] = lay_sx[31:16];
+assign aux_q[240 +: 16] = lay_sx[15:0];
+assign aux_q[256 +: 16] = lay_sy[63:48];
+assign aux_q[272 +: 16] = lay_sy[47:32];
+assign aux_q[288 +: 16] = lay_sy[31:16];
+assign aux_q[304 +: 16] = lay_sy[15:0];
+assign de_we     = aux_we && aux_i == 5'd3;
+assign okb_we    = aux_we && aux_i == 5'd4;
+assign irq_ss_we = aux_we && aux_i == 5'd5;
+assign lfsr_we   = aux_we && aux_i == 5'd6;
+assign com_we_ss = aux_we && aux_i >= 5'd7 && aux_i <= 5'd10;
+assign lay_we    = aux_we && aux_i >= 5'd11;
+
+kaneko_state u_state
+(
+    // its own reset is power-up's: a wake's file may come while the Pocket
+    // still holds the board in reset, and the load takes it out
+    .clk(clk), .rst(rst_por | ~rom_loaded), .game(game),
+    .ss_save(ss_save), .ss_go(ss_go), .ss_status(ss_status),
+    .ss_loading(ss_loading), .ss_refused(ss_refused),
+    .ss_addr(ss_addr), .ss_rd(ss_rd), .ss_do(ss_do), .ss_wr(ss_wr), .ss_di(ss_di),
+    .dl_wr(dl_wr), .dl_data(dl_data),
+    .vcnt(vcnt), .hcnt(hcnt), .line_start(line_start), .frame_edge(vbl_rise), .oki_div(oki_div),
+    .ss_park68(ss_park68), .ss_parkdisp68(ss_parkdisp68), .ss_rst68(ss_rst68), .ss_run68(ss_run68),
+    .fx_atstart(fx_atstart), .fx_atdisp(fx_atdisp), .fx_busidle(fx_busidle), .fx_uaddr(fx_uaddr),
+    .fx_regq(fx_regq), .fx_pc(fx_pc), .fx_sr(fx_sr), .fx_misc(fx_misc),
+    .fx_grpdisp(fx_grpdisp), .fx_clk(fx_clk),
+    .fx_rega(fx_rega), .fx_regwe(fx_regwe), .fx_regd(fx_regd),
+    .fx_srwe(fx_srwe), .fx_miscwe(fx_miscwe), .fx_grpwe(fx_grpwe), .fx_clkwe(fx_clkwe),
+    .fx_srd(fx_srd), .fx_miscd(fx_miscd), .fx_grpd(fx_grpd), .fx_clkd(fx_clkd),
+    .ss_vec(ss_vec), .ss_vec_sp(ss_vec_sp), .ss_vec_pc(ss_vec_pc),
+    .cpu_asn(ASn), .cpu_vec3(eab == 23'd3), .bus_dtackn(DTACKn), .cpu_ipl_n(cpu_ipl_n),
+    .bus_idle(bus_idle), .mcu_busy(mcu_busy),
+    .ss_freeze(ss_freeze), .ss_okirun(ss_okirun), .ss_sysrst(ss_sysrst), .ss_cinval(ss_cinval),
+    .ss_scan(ss_scan), .ss_gsh(ss_gsh), .ss_gi(ss_gi), .oki_go(oki0_go),
+    .oki_quiet(oki_quiet), .oki_phase(oki_phase),
+    .kc_swap_full(kc_swap_full), .kc_draw_busy(kc_draw_busy),
+    .kc_disp(kc_disp), .kc_snap_sel(kc_draw_snap_q),
+    .kc_snap_en(kc_snap_en), .kc_snap_a(kc_snap_a), .kc_snap_we(kc_snap_we),
+    .kc_snap_d(kc_snap_d), .kc_snap_q(kc_snap_q),
+    .kc_draw(kc_draw), .kc_draw_disp(kc_draw_disp), .kc_draw_snap(kc_draw_snap),
+    .ss_bus(ss_bus), .ss_as(ss_as), .ss_a(ss_a), .ss_d(ss_d), .ss_rw(ss_rw), .bus_q(bus_iEdb),
+    .ss_ee(ss_ee), .ss_ee_a(ss_ee_a), .ss_ee_we(ss_ee_we), .ss_ee_d(ss_ee_d), .ee_q(ee_q),
+    .aux_q(aux_q), .aux_we(aux_we), .aux_i(aux_i), .aux_d(aux_d)
+);
 
 endmodule
 

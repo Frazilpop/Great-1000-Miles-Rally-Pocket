@@ -128,7 +128,14 @@ module kaneko_toybox #(
     input  wire  [15:0] ee_dout,
     output logic        ee_dirty_set,
 
-    input  wire  [15:0] dsw
+    input  wire  [15:0] dsw,
+
+    // Save states: the four command words, read and put back directly (four
+    // 0xFFFF written through com_we would start a command)
+    output wire  [63:0] ss_com_q,
+    input  wire         ss_com_we,
+    input  wire  [1:0]  ss_com_sel,
+    input  wire  [15:0] ss_com_d
 );
 
     // ------------------------------------------------------------ mcu_com_w
@@ -165,6 +172,7 @@ module kaneko_toybox #(
     state_t st;
 
     wire start = all_ff && com_we && (st == S_IDLE);
+    assign ss_com_q = {com[3], com[2], com[1], com[0]};
     assign busy = start || (st != S_IDLE);
 
     // ------------------------------------------------------------ registers
@@ -208,6 +216,7 @@ module kaneko_toybox #(
         for (int i = 0; i < 4; i++) com[i] <= com_nx[i];
         if (com_we && all_ff)
             for (int i = 0; i < 4; i++) com[i] <= 16'h0000;
+        if (ss_com_we) com[ss_com_sel] <= ss_com_d;
 
         case (st)
         S_IDLE: if (start) begin

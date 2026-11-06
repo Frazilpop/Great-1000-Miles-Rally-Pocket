@@ -22,5 +22,5 @@ verilator --lint-only -Wall --top-module core_top \
   "$board" \
   "$fpga/core/pocket_sync.sv" "$fpga/core/pocket_rom_loader.sv" \
   "$fpga/core/pocket_sram.sv" "$fpga/core/pocket_fb_psram.sv" \
-  "$fpga/core/pocket_video.sv" "$fpga/core/pocket_diag.sv" "$fpga/core/pocket_nvram.sv" \
+  "$fpga/core/pocket_video.sv" "$fpga/core/pocket_diag.sv" "$fpga/core/pocket_nvram.sv" "$fpga/core/pocket_state.sv" \
   "$fpga/core/core_top.v" "$@"

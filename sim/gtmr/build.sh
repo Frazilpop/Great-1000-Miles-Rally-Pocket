@@ -12,11 +12,22 @@ export TMPDIR="$PWD/build/tmp"
 # --noassert because the ALU's `unique case` is not full in every state.
 F=third_party/fx68k/hdl
 sed 's/^typedef struct {/typedef struct packed {/' "$F/fx68k.sv" > build/fx68k/fx68k.sv
+# pocket_state.sv, the Pocket's side of the save states, as a model of its
+# own for --pocket: its two clocks are driven apart from the board's.
+O="${OBJ:-build/obj_gtmr}"
+mkdir -p "$O"
+verilator --cc --build -j 0 -O2 --x-assign fast --x-initial 0 \
+  -Wno-fatal -Wno-lint -Wno-style --prefix Vbridge --top-module pocket_state -Mdir "$O/bridge" \
+  -CFLAGS -O2 pocket/src/fpga/core/pocket_state.sv third_party/pocket-utils/ip/data_loader.sv \
+  sim/gtmr/dcfifo.sv pocket/src/fpga/apf/common.v > "$O/bridge.log" 2>&1 ||
+  { grep -E '%Error' "$O/bridge.log" | head -20; exit 1; }
+# (Verilator's make doesn't relink for a library passed in -LDFLAGS)
+[ "$O/bridge/Vbridge__ALL.a" -nt "$O/tb_gtmr" ] && rm -f "$O/tb_gtmr"
 verilator --cc --exe --build -j 0 -O3 --x-assign fast --x-initial 0 --noassert \
   -Wno-fatal -Wno-lint -Wno-style -Wno-MULTIDRIVEN -Wno-TIMESCALEMOD \
   --top-module kaneko_gtmr --Mdir "${OBJ:-build/obj_gtmr}" -o tb_gtmr \
-  -CFLAGS -O2 "$@" \
-  rtl/top/kaneko_gtmr.sv rtl/cpu/kaneko_gtmr_bus.sv rtl/cpu/kaneko_irq.sv \
+  -CFLAGS "-O2 -I$PWD/$O/bridge" -LDFLAGS "$PWD/$O/bridge/Vbridge__ALL.a" "$@" \
+  rtl/top/kaneko_gtmr.sv rtl/top/kaneko_state.sv rtl/cpu/kaneko_gtmr_bus.sv rtl/cpu/kaneko_irq.sv \
   rtl/io/kaneko_hit.sv rtl/mem/kaneko_gtmr_vmem.sv \
   rtl/video/kaneko_video_timing.sv rtl/video/kaneko_regs16.sv \
   rtl/video/kaneko_tilerom.sv rtl/video/kaneko_tmap.sv rtl/video/kaneko_tmap_fetch.sv \

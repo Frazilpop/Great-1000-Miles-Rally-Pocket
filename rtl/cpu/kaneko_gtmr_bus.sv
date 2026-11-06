@@ -100,7 +100,14 @@ module kaneko_gtmr_bus #(
     input  wire [15:0]  in_p1, in_p2, in_sys, in_unk,
 
     output logic [15:0] disp_enable,
-    output logic        unmapped_hit
+    output logic        unmapped_hit,
+
+    // Save states (kaneko_state): idle with nothing asked of the ROM or the
+    // SRAM; the line cache emptied; the display enable put back.
+    output wire         idle,
+    input  wire         cinval,
+    input  wire         de_we,
+    input  wire  [15:0] de_d
 );
 
     wire [23:1] a  = eab;
@@ -187,6 +194,7 @@ module kaneko_gtmr_bus #(
     // ---------------------------------------------------------- the FSM
     typedef enum logic [2:0] { S_IDLE, S_ROM, S_RAM, S_MCU, S_PALRD, S_DONE } state_t;
     state_t state;
+    assign idle = (state == S_IDLE) && !rom_req && !ram_req;
     logic [15:0] hold_word;     // ROM or SRAM data, held for the rest of the cycle
     logic [1:0]  mcu_wait;
 
@@ -316,6 +324,8 @@ module kaneko_gtmr_bus #(
 
                 default: state <= S_IDLE;
             endcase
+            if (cinval) cvalid <= '0;
+            if (de_we)  disp_enable <= de_d;
         end
     end
 

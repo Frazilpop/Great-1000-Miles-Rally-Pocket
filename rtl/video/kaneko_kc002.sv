@@ -96,7 +96,25 @@ module kaneko_kc002 #(
 
     // Observability
     output logic [15:0] draw_clocks,   // clocks the last draw took, /64
-    output logic [7:0]  overruns       // draws that missed their swap
+    output logic [7:0]  overruns,      // draws that missed their swap
+
+    // Save states (kaneko_state). ss_freeze holds the capture and the swap.
+    // With the draw idle, the snapshot's ports are ss_snap_*'s (read one
+    // clock after the address). ss_draw starts a draw at once, from
+    // snapshot ss_draw_snap into the chip that ss_draw_disp leaves undisplayed.
+    input  wire         ss_freeze,
+    output wire         ss_swap_full,  // this frame's swap showed a list and started one
+    output wire         ss_draw_busy,
+    output wire         ss_disp,
+    output wire         ss_draw_snap_q,
+    input  wire         ss_snap_en,
+    input  wire  [12:0] ss_snap_a,
+    input  wire         ss_snap_we,
+    input  wire  [15:0] ss_snap_d,
+    output wire  [15:0] ss_snap_q,
+    input  wire         ss_draw,
+    input  wire         ss_draw_disp,
+    input  wire         ss_draw_snap
 );
 
     localparam [9:0] LINE_CAPTURE = 10'd224;   // MAME's scanline-224 interrupt
@@ -123,6 +141,7 @@ module kaneko_kc002 #(
     // other one. A capture that lands on an undrawn list replaces it: that
     // list was going to be shown late anyway, and the newer one is better.
     logic cap_go;
+    logic swap_full;
     always_ff @(posedge clk) begin
         cap_go  <= 1'b0;
         draw_go <= 1'b0;
@@ -132,7 +151,19 @@ module kaneko_kc002 #(
             draw_snap <= 1'b0;
             draw_done <= 1'b0;
             overruns  <= '0;
+            swap_full <= 1'b0;
+        end else if (ss_freeze) begin
+            if (ss_draw) begin
+                disp      <= ss_draw_disp;
+                draw_snap <= ss_draw_snap;
+                snap_new  <= 1'b0;
+                draw_done <= 1'b0;
+                draw_go   <= 1'b1;
+            end
+            if (draw_fin) draw_done <= 1'b1;
         end else begin
+            if (line_start && vcnt == LINE_SWAP)
+                swap_full <= !draw_busy && draw_done && snap_new;
             if (line_start && vcnt == LINE_CAPTURE) begin
                 cap_go   <= 1'b1;
                 snap_cap <= ~draw_snap;
@@ -157,6 +188,10 @@ module kaneko_kc002 #(
         end
     end
     wire dbuf = ~disp;   // the chip being drawn
+    assign ss_swap_full   = swap_full;
+    assign ss_draw_busy   = draw_busy;
+    assign ss_disp        = disp;
+    assign ss_draw_snap_q = draw_snap;
 
     // Which captured list is where, for the simulation harness: every capture
     // is numbered, the number travels with the draw, and shown_tag is the
@@ -171,7 +206,7 @@ module kaneko_kc002 #(
             if (cap_go) cap_tag <= cap_tag + 16'd1;
             if (draw_go) draw_tag <= cap_tag;
             if (draw_fin) done_tag <= draw_tag;
-            if (line_start && vcnt == LINE_SWAP && !draw_busy && draw_done) shown_tag <= done_tag;
+            if (line_start && vcnt == LINE_SWAP && !draw_busy && draw_done && !ss_freeze) shown_tag <= done_tag;
         end
     end
 
@@ -200,7 +235,8 @@ module kaneko_kc002 #(
                 cp_wa  <= cp_cnt[11:0];
             end
         end
-        if (cp_wv) snap[{snap_cap, cp_wa}] <= spr_q;
+        if (ss_snap_en && ss_snap_we) snap[ss_snap_a] <= ss_snap_d;
+        else if (cp_wv) snap[{snap_cap, cp_wa}] <= spr_q;
     end
     always_comb spr_addr = cp_cnt[11:0];
 
@@ -242,7 +278,8 @@ module kaneko_kc002 #(
     /* verilator lint_on UNUSEDSIGNAL */
     logic [15:0] snap_q;
     logic [12:0] snap_ra;
-    always_ff @(posedge clk) snap_q <= snap[snap_ra];
+    always_ff @(posedge clk) snap_q <= snap[ss_snap_en ? ss_snap_a : snap_ra];
+    assign ss_snap_q = snap_q;
 
     // The latches
     logic [15:0] l_x, l_y, l_xo, l_yo;

@@ -16,16 +16,31 @@ These land in `third_party/`, pinned in `deps.lock`, and are never committed.
 
 ### fx68k – GPL-3.0-only
 `deps.lock` pins `jtfpga/fx68k`, which is ijor's code repackaged for jtframe –
-`hdl/fx68k.sv` is identical apart from line endings. Synthesis takes `hdl/`,
-simulation takes its `hdl/verilator/` variant. The bootstrap symlinks
-`microrom.mem` and `nanorom.mem` into the repo root, where fx68k loads them
-from.
+`hdl/fx68k.sv` is identical apart from line endings. One local patch,
+`tools/patches/fx68k-state.patch`, is applied by the bootstrap: ports for save
+states, which stop the 68000 at an instruction boundary and read and load its
+registers. Synthesis and simulation both take the patched `hdl/`; the
+simulation compiles a copy with the nanocode struct packed, which Verilator
+needs. The bootstrap symlinks `microrom.mem` and `nanorom.mem` into the repo
+root, where fx68k loads them from.
 
 ### jt6295 – GPL-3.0-or-later
-One local patch, `tools/patches/jt6295-busy-on-commit.patch`, applied by the
-bootstrap: the busy flags only change on the tick that commits a STOP or
-START, as in MAME. Without it Great 1000 Miles Rally loses STOPs and the
-68000 spins on the status after a crash. The or-later clause is in each
+Five local patches in `tools/patches/`, applied by the bootstrap in turn (the
+build checks they are there):
+
+- `jt6295-busy-on-commit.patch` – the busy flags only change on the tick that
+  commits a STOP or START, as in MAME. Without it Great 1000 Miles Rally loses
+  STOPs and the 68000 spins on the status after a crash.
+- `jt6295-end-byte.patch` – a phrase plays both nibbles of its last byte, as
+  MAME's okim6295 does; it used to end one sample short.
+- `jt6295-start-on-end-byte.patch` – a voice starts only once the whole of its
+  end address has been read, so a slow ROM can't cut a phrase short.
+- `jt6295-keep-stops.patch` – a second STOP or a phrase byte no longer wipes a
+  pending STOP, so a voice the game stops stays stopped.
+- `jt6295-state.patch` – a scan chain through each chip's state, for save
+  states.
+
+The or-later clause is in each
 `hdl/` file header, and the header counts, not `LICENSE` – re-read it after
 every `bootstrap.sh --update`.
 
@@ -54,6 +69,18 @@ VIEW2 tilemaps and video timing, the 16-bit register blocks, the interrupt
 controller, the OKI banking, the hit chip, the per-module tests and the
 tools that grew from upstream's. The SDRAM controller follows meathax's
 System 32 controller (GPL-3.0) – keep that note in the file.
+
+### RndMnkIII's Analogizer module – MIT, with GPL parts
+`pocket/src/fpga/analogizer/` is the adapter module of RndMnkIII's
+[Analogizer](https://github.com/RndMnkIII/Analogizer) (`analogizer/` at
+`4b35f83`, © 2024 RndMnkIII, MIT), only the files it uses, as
+`analogizer.qip` lists them. Three of them carry their own licences:
+`yc_out.sv` (Mike Simone, GPL-2.0-or-later), `scandoubler.v` (Till Harbaum,
+from MiST, GPL-3.0-or-later) and `vga_out_sw.v` (MiSTer's `vga_out`, by
+Sorgelig, GPL). Two changes are made, marked in the files: the
+scandoubler's pixel clock divider set for this board, and the PlayStation
+pad reader left out – its `dualshock_controller.v` is free for
+non-commercial use only, which the GPL does not allow.
 
 ### Analogue openFPGA core template – Analogue's APF Software License Agreement
 `pocket/src/fpga/apf/`, `core_bridge_cmd.v` and the Quartus project files are

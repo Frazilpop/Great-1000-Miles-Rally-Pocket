@@ -68,10 +68,33 @@ Under **Core Settings** there are four options:
 - **Reset Game**
 - **Diagnostic overlay** – probably best to ignore this
 
-## Technical details
+## Memories and Sleep
+
+The core supports Memories as well as Sleep / Wake. Memories store the board's
+EEPROM, where the game keeps its settings and best times, meaning these are
+saved / loaded too.
+
+## Analogizer
+
+The core supports RndMnkIII's [Analogizer](https://github.com/RndMnkIII/Analogizer),
+which plugs into the Pocket's cartridge slot. It sends the arcade board's own
+picture to a CRT or TV, and lets you play with SNAC controllers.
+
+- **Video** – the board's original 15 kHz signal as RGBS, RGsB, YPbPr or Y/C (NTSC or PAL), or 31 kHz for a VGA monitor through the scandoubler, with 0–75 % scanlines (HQ2x shows as the plain scandoubler).
+- **Controllers** – DB15, NES, SNES and PC Engine pads through a SNAC adapter, for either player. The buttons work as they do on the Pocket.
+- **Setup** – the core reads the shared `analogizer.bin` in `Assets/analogizer/common/`, which Pupdate or AnalogizerConfigurator writes. That file sets the video mode, the controllers and whether the Pocket's own screen stays on. Without it the core works as normal.
+
+Once an Analogizer is set up in `analogizer.bin`, the core drives the cartridge
+slot, as every Analogizer core does, so play with the adapter in the slot
+rather than a game cartridge. Without it set up, the slot's pins are left idle,
+and a cartridge left in the slot is fine. This is standard Analogizer
+functionality.
+
+Technical details
 
 - The core recreates Kaneko's arcade board in hardware logic, built on [alphanu1's Kaneko16 MiSTer core](https://github.com/alphanu1/kaneko16-mister) with the Mille Miglia board and a Pocket shell.
 - It's been checked against MAME in simulation – over three million moves of the game's main processor, identical from power-on.
+- Sound: every phrase as the arcade plays it. In simulation the two sound chips play the same phrases as MAME, every one that runs to its end exact to the sample, in races and attract on the original set, Evolution and Mille Miglia 2.
 - To build it yourself: `tools/bootstrap.sh`, then `sh pocket/build.sh` (Quartus Prime Lite 21.1 in Docker, about ten minutes). The finished SD card layout can be found in `pocket/dist/`.
 
 ## Credits and licence
@@ -79,6 +102,7 @@ Under **Core Settings** there are four options:
 - **alphanu1** – the Kaneko16 MiSTer core this is built on.
 - **Jorge Cwik (ijor)** – fx68k, the 68000 processor.
 - **Jose Tejada (jotego)** – jt6295, the sound chips.
+- **RndMnkIII** – the Analogizer and its adapter module, with **Mike Simone**'s Y/C encoder and **Till Harbaum**'s scandoubler from MiST.
 - **agg23** – the Pocket utilities used for loading, PSRAM and audio.
 - **Analogue** – the openFPGA core framework.
 - **The MAME team** – whose work on the Kaneko boards was referenced.

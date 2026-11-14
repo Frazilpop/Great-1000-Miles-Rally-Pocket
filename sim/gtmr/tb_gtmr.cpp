@@ -15,6 +15,12 @@
 //   SRAM    128K x 16, fixed latency.
 //   PSRAM   two 4M-word arrays, row reads/writes, fixed latency per row
 //           (default 96 clocks: sixteen ~100 ns async accesses at 48 MHz).
+//           --fb-async: pocket_fb_psram's measured cost instead, a read 99
+//           clocks, a write 3 + 6 a word its mask lets through.
+//           --fb-rtl: the shell's own servants instead (sim/gtmr/fb_top.sv:
+//           pocket_fb_burst on clk_sdram, two edges a board clock, each on a
+//           psram_model), with what they measured at boot and the model's
+//           protocol violations at the end.
 //
 // The loader snoop is fed the sprite region before reset is released, so the
 // blank-code table is built exactly as on the Pocket.
@@ -92,6 +98,7 @@
 
 #include "Vkaneko_gtmr.h"
 #include "Vbridge.h"
+#include "Vfb.h"
 #include "Vkaneko_gtmr___024root.h"
 #ifdef ANALOGIZER
 #include "Vanz.h"
@@ -142,6 +149,7 @@ int main(int argc, char** argv) {
     std::set<int> dumps;
     int fb_lat = 96, rom_lat = 10, ram_lat = 4;
     int sdr_serial = 0;
+    bool fb_async = false, fb_rtl = false;
     const char* trace_path = nullptr;
     long trace_count = 0;
     bool trace_data_only = false;
@@ -165,6 +173,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--rom-lat") && i + 1 < argc) rom_lat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ram-lat") && i + 1 < argc) ram_lat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sdram-serial") && i + 1 < argc) sdr_serial = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--fb-async"))                 fb_async = true;
+        else if (!strcmp(argv[i], "--fb-rtl"))                   fb_rtl = true;
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc)   trace_path = argv[++i];
         else if (!strcmp(argv[i], "--trace-count") && i + 1 < argc) trace_count = atol(argv[++i]);
         else if (!strcmp(argv[i], "--trace-data-only"))          trace_data_only = true;
@@ -259,6 +269,20 @@ int main(int argc, char** argv) {
     }
     std::function<void()> anz_edge;
 #endif
+    Vfb* fbm = nullptr;
+    if (fb_rtl) {
+        fbm = new Vfb;
+        fbm->clk_fast = 0; fbm->rst = 1;
+        fbm->fb0_req = 0; fbm->fb1_req = 0;
+        fbm->eval();
+    }
+    // the board's fbN outputs into the servants
+    auto fb_in = [&]() {
+        fbm->fb0_req = t->fb0_req; fbm->fb0_we = t->fb0_we; fbm->fb0_addr = t->fb0_addr;
+        fbm->fb0_wdata = t->fb0_wdata; fbm->fb0_wmask = t->fb0_wmask;
+        fbm->fb1_req = t->fb1_req; fbm->fb1_we = t->fb1_we; fbm->fb1_addr = t->fb1_addr;
+        fbm->fb1_wdata = t->fb1_wdata; fbm->fb1_wmask = t->fb1_wmask;
+    };
     auto tick = [&]() {
 #ifdef ANALOGIZER
         // the board's outputs as they stood before this edge, and the
@@ -284,8 +308,24 @@ int main(int argc, char** argv) {
             t->ss_rd = br->ss_rd; t->ss_wr = br->ss_wr; t->ss_di = br->ss_di;
             br->clk = 0; br->eval();
         }
+        if (fbm) {
+            // the edge shared with the board: each side sees the other as
+            // it stood before it
+            fb_in();
+            t->fb0_ack = fbm->fb0_ack; t->fb0_rdata = fbm->fb0_rdata;
+            t->fb1_ack = fbm->fb1_ack; t->fb1_rdata = fbm->fb1_rdata;
+            fbm->rst = t->rst_por;
+            fbm->clk_fast = 1; fbm->eval();
+        }
         t->clk = 0; t->eval();
         t->clk = 1; t->eval();
+        if (fbm) {
+            // and the one between, with the board's new outputs
+            fbm->clk_fast = 0; fbm->eval();
+            fb_in();
+            fbm->clk_fast = 1; fbm->eval();
+            fbm->clk_fast = 0; fbm->eval();
+        }
         if (br) { br->clk = 1; br->eval(); }
 #ifdef ANALOGIZER
         a->clk_core = 1; a->clk_anz = !a->clk_anz; a->eval();
@@ -315,6 +355,11 @@ int main(int argc, char** argv) {
     t->dl_wr = 0;
     t->rom_loaded = 1;
     t->rst = 0;
+    if (fbm)
+        fprintf(stderr, "PSRAM servants: %s, cal_fail %u, chip 0 wr %u rd %u ph %u, chip 1 wr %u rd %u ph %u\n",
+                fbm->ready ? "ready" : "NOT READY", (unsigned)fbm->cal_fail,
+                fbm->lats >> 4 & 7, fbm->lats & 7, fbm->lats >> 3 & 1,
+                fbm->lats >> 11 & 7, fbm->lats >> 7 & 7, fbm->lats >> 10 & 1);
 
     // ----------------------------------------------------------- port state
     struct Port { int busy = 0; int cnt = 0; uint32_t addr = 0; };
@@ -328,7 +373,11 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks\n");
+    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks,draw_busy,w_psram,w_starved,f_rom\n");
+    // The draw's clocks this frame: busy at all, the writer waiting on a
+    // PSRAM row, the writer idle with nothing to write, the fetcher waiting
+    // on the sprite ROM.
+    uint64_t d_busy = 0, d_wps = 0, d_wst = 0, d_rom = 0;
     // Tile line fetch: lines whose fetch was still running when the next
     // line started (the display then reads a half-written bank), and the
     // longest fetch, start to done.
@@ -477,6 +526,10 @@ int main(int argc, char** argv) {
     uint64_t letgo_cyc = 0;
     auto let_go = [&]() {
         letgo_cyc = cyc;
+        // --sdram-serial's refresh count is the harness's, in no state: both
+        // runs restart it here, so it can't tell them apart (a different
+        // phase moved gtmre's slideshow by a few clocks for three frames).
+        refi = 350;
         std::string ap = outdir + "/after.txt";
         after = fopen(ap.c_str(), "w");
         after_k = 0; snd_crc = 0;
@@ -787,11 +840,16 @@ int main(int argc, char** argv) {
             ram_p.busy = 0;
         }
 
-        for (int c = 0; c < 2; c++) {
+        if (!fbm) for (int c = 0; c < 2; c++) {
             Port& P = fbp[c];
             bool rq = c ? t->fb1_req : t->fb0_req;
             if (c) t->fb1_ack = 0; else t->fb0_ack = 0;
-            if (!P.busy && rq) { P.busy = 1; P.cnt = fb_lat; }
+            if (!P.busy && rq) {
+                P.busy = 1; P.cnt = fb_lat;
+                if (fb_async)
+                    P.cnt = (c ? t->fb1_we : t->fb0_we)
+                          ? 3 + 6 * __builtin_popcount(c ? t->fb1_wmask : t->fb0_wmask) : 99;
+            }
             if (P.busy && --P.cnt <= 0) {
                 uint32_t a  = c ? t->fb1_addr : t->fb0_addr;
                 bool     we = c ? t->fb1_we : t->fb0_we;
@@ -829,6 +887,13 @@ int main(int argc, char** argv) {
             if (so && !spr_run_prev) spr_t0 = cyc;
             if (!so && spr_run_prev && cyc - spr_t0 > max_spr) max_spr = cyc - spr_t0;
             spr_run_prev = so;
+            if (R.kaneko_gtmr__DOT__u_spr__DOT__draw_busy) {
+                d_busy++;
+                int ws = R.kaneko_gtmr__DOT__u_spr__DOT__wst;
+                if (ws == 4) d_wps++;
+                if (ws == 0 && !R.kaneko_gtmr__DOT__u_spr__DOT__pq_valid) d_wst++;
+                if (R.kaneko_gtmr__DOT__u_spr__DOT__f_busy && (R.kaneko_gtmr__DOT__u_spr__DOT__f_have != 3)) d_rom++;
+            }
         }
         {
             bool as = R.kaneko_gtmr__DOT__dbg_as;
@@ -897,7 +962,7 @@ int main(int argc, char** argv) {
                     fwrite(sprimg.data(), 2, sprimg.size(), f);
                     fclose(f);
                 }
-                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu\n", frame,
+                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n", frame,
                         (unsigned)R.kaneko_gtmr__DOT__spr_draw_clocks,
                         (unsigned)R.kaneko_gtmr__DOT__spr_overruns,
                         (unsigned long long)cyc,
@@ -908,7 +973,10 @@ int main(int argc, char** argv) {
                         (unsigned long long)max_wait, max_wait_addr,
                         (unsigned long long)hold_clocks,
                         (unsigned long long)late_lines, (unsigned long long)max_line,
-                        (unsigned long long)late_spr, (unsigned long long)max_spr);
+                        (unsigned long long)late_spr, (unsigned long long)max_spr,
+                        (unsigned long long)d_busy, (unsigned long long)d_wps,
+                        (unsigned long long)d_wst, (unsigned long long)d_rom);
+                d_busy = d_wps = d_wst = d_rom = 0;
                 late_lines = 0; max_line = 0; late_spr = 0; max_spr = 0;
                 bus_cycles_f = bus_cycles; as_clocks_f = as_clocks;
                 max_wait = 0; max_wait_addr = 0; hold_clocks = 0;
@@ -951,6 +1019,7 @@ int main(int argc, char** argv) {
     }
 
     fclose(stats);
+    if (fbm) fprintf(stderr, "PSRAM protocol violations: %u\n", (unsigned)fbm->violations);
 #ifdef ANALOGIZER
     if (anz_keys) fclose(anz_keys);
     fprintf(stderr, "analogizer: word taken %08x; pins off the template's on %llu of %llu edges with it off; "

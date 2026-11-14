@@ -474,8 +474,11 @@ wire [15:0] dsw_74    = gtmr2_map ? dsw_gtmr2 : dsw_gtmr;
 // ---- the APF command bridge, as the template wires it
 wire            status_boot_done  = pll_core_locked_s;
 // "Setup" means ready to take memory writes, which here means the SDRAM has
-// finished its power-up sequence.
+// finished its power-up sequence, and the two PSRAMs theirs (calibrated and
+// cleared, about 2 ms) so that nothing the board does meets one booting.
 wire            mem_ready;
+wire            sdram_ready, fb_ready0, fb_ready1;
+assign          mem_ready = sdram_ready & fb_ready0 & fb_ready1;
 wire            mem_ready_74;
 synch_3 s_memrdy74 (.i(mem_ready), .o(mem_ready_74), .clk(clk_74a), .rise(), .fall());
 wire            status_setup_done = pll_core_locked_s & mem_ready_74;
@@ -826,7 +829,7 @@ kaneko_sdram #(
 ) u_sdram (
     .clk       (clk_sdram),
     .rst_n     (sdram_rst_n),
-    .ready     (mem_ready),
+    .ready     (sdram_ready),
     .rd_lat_sel(rd_lat_sel),
 
     .sd_cke    (dram_cke),
@@ -896,26 +899,38 @@ wire [21:0]  fb1_addr;
 wire [255:0] fb1_wdata, fb1_rdata;
 wire [15:0]  fb1_wmask;
 
-pocket_fb_psram u_fb0 (
-    .clk       (clk_core),   .rst      (rst_por),
+// Each chip in synchronous bursts on clk_sdram (pocket_fb_burst, with
+// pocket_psram_rows inside), the tri-state here. Both measure their read and
+// write latencies at power-up; the overlay shows them (counter 5).
+wire [15:0]  cram0_dq_o, cram1_dq_o;
+wire         cram0_dq_oe, cram1_dq_oe;
+assign cram0_dq = cram0_dq_oe ? cram0_dq_o : 16'hzzzz;
+assign cram1_dq = cram1_dq_oe ? cram1_dq_o : 16'hzzzz;
+wire         fb_cal_fail0, fb_cal_fail1;
+wire [6:0]   fb_lats0, fb_lats1;
+
+pocket_fb_burst u_fb0 (
+    .clk_fast  (clk_sdram),  .rst      (rst_por),
     .req       (fb0_req),    .we       (fb0_we),     .addr (fb0_addr),
     .wdata     (fb0_wdata),  .wmask    (fb0_wmask),
     .ack       (fb0_ack),    .rdata    (fb0_rdata),
-    .cram_a    (cram0_a),    .cram_dq  (cram0_dq),   .cram_wait (cram0_wait),
-    .cram_clk  (cram0_clk),  .cram_adv_n(cram0_adv_n), .cram_cre(cram0_cre),
-    .cram_ce0_n(cram0_ce0_n),.cram_ce1_n(cram0_ce1_n),
+    .ready     (fb_ready0),  .cal_fail (fb_cal_fail0), .lats (fb_lats0),
+    .cram_a    (cram0_a),    .cram_dq_o(cram0_dq_o), .cram_dq_oe(cram0_dq_oe),
+    .cram_dq_i (cram0_dq),   .cram_clk (cram0_clk),  .cram_adv_n(cram0_adv_n),
+    .cram_cre  (cram0_cre),  .cram_ce0_n(cram0_ce0_n), .cram_ce1_n(cram0_ce1_n),
     .cram_oe_n (cram0_oe_n), .cram_we_n(cram0_we_n),
     .cram_ub_n (cram0_ub_n), .cram_lb_n(cram0_lb_n)
 );
 
-pocket_fb_psram u_fb1 (
-    .clk       (clk_core),   .rst      (rst_por),
+pocket_fb_burst u_fb1 (
+    .clk_fast  (clk_sdram),  .rst      (rst_por),
     .req       (fb1_req),    .we       (fb1_we),     .addr (fb1_addr),
     .wdata     (fb1_wdata),  .wmask    (fb1_wmask),
     .ack       (fb1_ack),    .rdata    (fb1_rdata),
-    .cram_a    (cram1_a),    .cram_dq  (cram1_dq),   .cram_wait (cram1_wait),
-    .cram_clk  (cram1_clk),  .cram_adv_n(cram1_adv_n), .cram_cre(cram1_cre),
-    .cram_ce0_n(cram1_ce0_n),.cram_ce1_n(cram1_ce1_n),
+    .ready     (fb_ready1),  .cal_fail (fb_cal_fail1), .lats (fb_lats1),
+    .cram_a    (cram1_a),    .cram_dq_o(cram1_dq_o), .cram_dq_oe(cram1_dq_oe),
+    .cram_dq_i (cram1_dq),   .cram_clk (cram1_clk),  .cram_adv_n(cram1_adv_n),
+    .cram_cre  (cram1_cre),  .cram_ce0_n(cram1_ce0_n), .cram_ce1_n(cram1_ce1_n),
     .cram_oe_n (cram1_oe_n), .cram_we_n(cram1_we_n),
     .cram_ub_n (cram1_ub_n), .cram_lb_n(cram1_lb_n)
 );
@@ -1103,7 +1118,10 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
 //     cycles; low half: the longest KC-002 draw, clocks / 64
 //   3 longest wait on SDRAM port 4 (68000 ROM line), request to ack, clocks
 //   4 longest wait on the SRAM (68000 external RAM), request to ack, clocks
-//   5 KC-002 overruns (draws that missed their swap)
+//   5 low byte: KC-002 overruns (draws that missed their swap); above it
+//     the PSRAMs' boot measurements, chip 1 then chip 0, each a hex digit
+//     pair: bit 7 of the pair calibration failed, then the write latency,
+//     the read phase and the read latency (0x44 = write 4, read 4 phase 0)
 //   6 words 1,0 of line 0 as SDRAM reads them back    7 words 3,2 as read back
 //
 // Peaks and flags 13-15 hold until the overlay is turned OFF in the menu
@@ -1188,7 +1206,8 @@ pocket_diag u_diag (
     .bars   (~rom_loaded),
     .flags  (diag_flags),
     .cnt    ({rb_line[63:32], rb_line[31:0],
-              24'd0, diag_spr_overruns, w_ram_max, w_rom4_max,
+              8'd0, fb_cal_fail1, fb_lats1, fb_cal_fail0, fb_lats0, diag_spr_overruns,
+              w_ram_max, w_rom4_max,
               diag_stall_frames, diag_draw_max,
               8'd0, diag_wait_addr, diag_wait_max}),
     .r_out  (dr), .g_out (dg), .b_out (db)

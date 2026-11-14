@@ -5,7 +5,7 @@
 #
 #   tools/pocket/state_test.sh <set> <frame> [--plan plan.txt] [--after N]
 #                              [--resave] [--sdram-serial N] [--pocket]
-#                              [--anz FILE] [--out DIR]
+#                              [--anz FILE] [--fb-rtl] [--out DIR]
 #
 # <set> is a ROM image's name in build/pocket (gtmr, gtmre, gtmrusa, gtmr2,
 # gtmr2u). The saving run asks for a clean point at <frame>, reads the state
@@ -17,6 +17,8 @@
 # number (bytes 0x1C-0x1F). The plan's inputs follow the saving run's frames.
 # --pocket makes both through pocket_state.sv as the Pocket drives it, the
 # load under the Pocket's reset (tb_gtmr's --pocket, --pocket-reset).
+# --fb-rtl runs both on the shell's own PSRAM servants and their models
+# (tb_gtmr's --fb-rtl) instead of the fixed-latency rows.
 # --anz FILE runs both with the Analogizer beside the board, set by FILE (an
 # analogizer.bin), the controls through it: sim/gtmr/build.sh --anz's harness,
 # so OBJ defaults to build/obj_anz.
@@ -26,7 +28,7 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 [ $# -ge 2 ] || { sed -n '3,20p' "$0"; exit 2; }
 set_name=$1; frame=$2; shift 2
-plan=""; after=300; resave=0; serial=""; out=""; pk=""; pkl=""; anz=""
+plan=""; after=300; resave=0; serial=""; out=""; pk=""; pkl=""; anz=""; fb=""
 while [ $# -gt 0 ]; do
     case $1 in
         --plan) plan=$2; shift 2 ;;
@@ -36,6 +38,7 @@ while [ $# -gt 0 ]; do
         --out) out=$2; shift 2 ;;
         --pocket) pk="--pocket"; pkl="--pocket --pocket-reset"; shift ;;
         --anz) anz="--anz-file $2"; shift 2 ;;
+        --fb-rtl) fb="--fb-rtl"; shift ;;
         *) echo "state_test.sh: unknown $1" >&2; exit 2 ;;
     esac
 done
@@ -52,11 +55,11 @@ inputs=""; [ -n "$plan" ] && inputs="--inputs $plan"
 
 # shellcheck disable=SC2086
 "$tb" "$rom" $game $((frame + after + 40)) "$out/save" --state-save "$frame" "$out/state.sta" \
-    --after "$after" $inputs $serial $pk $anz 2>&1 | grep -v '^frame ' > "$out/save.log"
+    --after "$after" $inputs $serial $fb $pk $anz 2>&1 | grep -v '^frame ' > "$out/save.log"
 re=""; [ $resave = 1 ] && re="--resave $out/resave.sta"
 # shellcheck disable=SC2086
 "$tb" "$rom" $game 100000 "$out/load" --state-load "$out/state.sta" --load-at 20 \
-    --after "$after" $re $inputs $serial $pkl $anz 2>&1 | grep -v '^frame ' > "$out/load.log"
+    --after "$after" $re $inputs $serial $fb $pkl $anz 2>&1 | grep -v '^frame ' > "$out/load.log"
 
 grep '^state:' "$out/save.log" | sed 's/^/saved:  /'
 grep '^state:' "$out/load.log" | sed 's/^/loaded: /'

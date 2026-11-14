@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Kaneko16 for Analogue Pocket — functional checks on the shell's servants.
 //
-//   - pocket_fb_psram against a behavioural AD-mux PSRAM: full and masked row
-//     writes read back exactly, and the CYCLES PER ROW the board will see.
+//   - pocket_fb_burst (pocket_psram_rows on a 96 MHz clock beside the 48 MHz
+//     one) against sim/models/psram_model: boot calibration, full, masked and
+//     empty row writes read back exactly, rows back to back as the KC-002
+//     asks for them (req down one 48 MHz cycle between), and the CYCLES PER
+//     ROW the board will see.
 //   - pocket_sram against a behavioural async SRAM: byte-enabled writes and
 //     reads, and cycles per access.
 //   - pocket_video against a 384x264 timing like the board's: one VS pulse per
@@ -14,37 +17,6 @@
 
 `timescale 1ns/1ps
 `default_nettype none
-
-// ------------------------------------------------------------ PSRAM model
-// Async, address/data multiplexed: the address is latched from DQ when ADV#
-// rises; a write lands when WE# rises with CE# low; OE# low drives DQ.
-module psram_model (
-    input  wire [21:16] a,
-    inout  wire [15:0]  dq,
-    input  wire         adv_n, ce0_n, oe_n, we_n, ub_n, lb_n,
-    input  wire         clk          // only to sample DQ mid-cycle, see below
-);
-    reg [15:0] mem [0:4095];
-    reg [21:0] addr;
-    reg [15:0] dlat;
-    reg        adv_q = 1'b1, wr_q = 1'b0;
-    // A write is WE# and CE# both low; it lands when the first of them rises
-    // (psram.sv raises both on the same edge, which a real part accepts).
-    wire       wr = !we_n && !ce0_n;
-    assign dq = (!ce0_n && !oe_n && we_n) ? mem[addr[11:0]] : 16'hzzzz;
-    // psram.sv releases DQ on the same edge that raises WE#/CE# (tDH = 0 on
-    // the part). In zero-delay simulation that order is a race, so the data is
-    // sampled mid-cycle while the write is active and used when it ends.
-    always @(negedge clk) if (wr) dlat = dq;
-    always @(adv_n or wr) begin
-        if (adv_n && !adv_q && !ce0_n) addr = {a, dq};
-        if (!wr && wr_q) begin
-            mem[addr[11:0]] = dlat;   // ub/lb: psram.sv always writes both
-        end
-        adv_q = adv_n;
-        wr_q  = wr;
-    end
-endmodule
 
 // ------------------------------------------------------------- SRAM model
 module sram_model (
@@ -65,8 +37,11 @@ module sram_model (
 endmodule
 
 module tb_shell;
-    reg clk = 0;
-    always #10.4167 clk = ~clk;              // 48 MHz
+    // 48 MHz and 96 MHz from one timebase, rising edges together, as from
+    // one PLL (periods exact multiples of the 1 ps precision)
+    reg clk = 0, clk_fast = 0;
+    always #10.416 clk = ~clk;
+    always #5.208  clk_fast = ~clk_fast;
     reg rst = 1;
     integer errors = 0;
 
@@ -78,20 +53,30 @@ module tb_shell;
     wire         fb_ack;
     wire [255:0] fb_rdata;
     wire [21:16] cram_a;
-    wire [15:0]  cram_dq;
+    wire [15:0]  dq_o, dq_m;
+    wire         dq_oe, oe_m;
+    wire [15:0]  cram_dq = dq_oe ? dq_o : oe_m ? dq_m : 16'd0;
     wire cram_clk, cram_adv_n, cram_cre, cram_ce0_n, cram_ce1_n, cram_oe_n, cram_we_n, cram_ub_n, cram_lb_n;
+    wire         fb_ready, fb_cal_fail;
+    wire [6:0]   fb_lats;
+    int unsigned ps_viol;
+    wire [15:0]  ps_bcr;
 
-    pocket_fb_psram dut_fb (
-        .clk(clk), .rst(rst),
+    pocket_fb_burst dut_fb (
+        .clk_fast(clk_fast), .rst(rst),
         .req(fb_req), .we(fb_we), .addr(fb_addr), .wdata(fb_wdata), .wmask(fb_wmask),
         .ack(fb_ack), .rdata(fb_rdata),
-        .cram_a(cram_a), .cram_dq(cram_dq), .cram_wait(1'b0), .cram_clk(cram_clk),
-        .cram_adv_n(cram_adv_n), .cram_cre(cram_cre), .cram_ce0_n(cram_ce0_n),
-        .cram_ce1_n(cram_ce1_n), .cram_oe_n(cram_oe_n), .cram_we_n(cram_we_n),
-        .cram_ub_n(cram_ub_n), .cram_lb_n(cram_lb_n));
+        .ready(fb_ready), .cal_fail(fb_cal_fail), .lats(fb_lats),
+        .cram_a(cram_a), .cram_dq_o(dq_o), .cram_dq_oe(dq_oe), .cram_dq_i(cram_dq),
+        .cram_clk(cram_clk), .cram_adv_n(cram_adv_n), .cram_cre(cram_cre),
+        .cram_ce0_n(cram_ce0_n), .cram_ce1_n(cram_ce1_n), .cram_oe_n(cram_oe_n),
+        .cram_we_n(cram_we_n), .cram_ub_n(cram_ub_n), .cram_lb_n(cram_lb_n));
 
-    psram_model m_ps (.a(cram_a), .dq(cram_dq), .adv_n(cram_adv_n), .ce0_n(cram_ce0_n),
-                      .oe_n(cram_oe_n), .we_n(cram_we_n), .ub_n(cram_ub_n), .lb_n(cram_lb_n), .clk(clk));
+    psram_model #(.LAT_W(4), .LAT_R(4)) m_ps (
+        .clk(clk_fast), .a(cram_a), .dq_i(dq_o), .dq_oe_i(dq_oe), .dq_o(dq_m), .dq_oe_o(oe_m),
+        .cram_clk(cram_clk), .adv_n(cram_adv_n), .cre(cram_cre), .ce0_n(cram_ce0_n),
+        .oe_n(cram_oe_n), .we_n(cram_we_n), .ub_n(cram_ub_n), .lb_n(cram_lb_n),
+        .violations(ps_viol), .bcr(ps_bcr));
 
     integer cyc;
     task automatic fb_row(input bit we, input [21:0] a, input [255:0] d, input [15:0] m,
@@ -102,6 +87,9 @@ module tb_shell;
         do begin @(posedge clk); cycles++; end while (!fb_ack);
         fb_req <= 0;                         // dropped on the edge that sees ack
     endtask
+    // The ack must be seen on exactly one 48 MHz edge per row.
+    integer acks = 0;
+    always @(posedge clk) if (fb_ack) acks++;
 
     // ======================================================= SRAM
     reg         r_req = 0, r_we = 0;
@@ -198,6 +186,16 @@ module tb_shell;
         rst <= 0;
         repeat (4) @(posedge clk);
 
+        // ---- PSRAM: the boot (power-up wait, calibration, the clear)
+        wait (fb_ready);
+        @(posedge clk);
+        $display("psram: ready at %0d us, cal_fail %0d, write latency %0d, read %0d phase %0d",
+                 $time / 1000, fb_cal_fail, fb_lats[6:4], fb_lats[2:0], fb_lats[3]);
+        if (fb_cal_fail || fb_lats[6:4] != 4 || fb_lats[2:0] != 4) begin
+            $display("ERROR: psram calibration"); errors++;
+        end
+        acks = 0;
+
         // ---- PSRAM: full write, read back
         for (i = 0; i < 16; i++) pat[16*i +: 16] = 16'h1000 + 16'(i * 257);
         fb_row(1, 22'd512 * 3 + 7, pat, 16'hffff, c);
@@ -216,6 +214,31 @@ module tb_shell;
         if (fb_rdata !== expect_row) begin $display("ERROR: psram masked readback %h", fb_rdata); errors++; end
         fb_row(1, 22'd0, pat2, 16'h0000, c);
         $display("psram: empty-mask write %0d cycles", c);
+        // one word, then a run of three in the middle
+        fb_row(1, 22'd512 * 3 + 7, {16{16'h7777}}, 16'h0001, c);
+        $display("psram: 1-word write    %0d cycles", c);
+        fb_row(1, 22'd512 * 3 + 7, {16{16'h3333}}, 16'h0e00, c);
+        $display("psram: 3-word write    %0d cycles", c);
+        expect_row[15:0] = 16'h7777;
+        for (i = 9; i < 12; i++) expect_row[16*i +: 16] = 16'h3333;
+        fb_row(0, 22'd512 * 3 + 7, 0, 0, c);
+        if (fb_rdata !== expect_row) begin $display("ERROR: psram partial readback %h", fb_rdata); errors++; end
+        if (acks != 7) begin $display("ERROR: %0d acks seen for 7 rows", acks); errors++; end
+
+        // ---- rows back to back, each a different row: a request held one
+        // cycle too long would write a row twice or read the next one's data
+        for (i = 0; i < 12; i++) begin
+            for (int j = 0; j < 16; j++) pat[16*j +: 16] = 16'(i * 4096 + j * 17 + 1);
+            fb_row(1, 22'(4096 + i * 16), pat, (i % 3 == 0) ? 16'hffff : (i % 3 == 1) ? 16'h00ff : 16'hff00, c);
+        end
+        for (i = 0; i < 12; i++) begin
+            fb_row(0, 22'(4096 + i * 16), 0, 0, c);
+            for (int j = 0; j < 16; j++)
+                if ((i % 3 == 0) || (i % 3 == 1 && j < 8) || (i % 3 == 2 && j >= 8))
+                    if (fb_rdata[16*j +: 16] !== 16'(i * 4096 + j * 17 + 1)) begin
+                        $display("ERROR: psram row %0d word %0d = %h", i, j, fb_rdata[16*j +: 16]); errors++;
+                    end
+        end
 
         // ---- back-to-back rows: the period the board will see
         begin
@@ -224,8 +247,15 @@ module tb_shell;
             for (i = 0; i < 10; i++) fb_row(0, 22'(i * 16), 0, 0, c);
             t1 = $time;
             $display("psram: 10 back-to-back row reads: %0d cycles per row",
-                     (t1 - t0) / 20.8333 / 10);
+                     (t1 - t0) / 20.832 / 10);
+            t0 = $time;
+            for (i = 0; i < 10; i++) fb_row(1, 22'(i * 16), pat, 16'hffff, c);
+            t1 = $time;
+            $display("psram: 10 back-to-back row writes: %0d cycles per row",
+                     (t1 - t0) / 20.832 / 10);
         end
+        if (acks != 7 + 24 + 20) begin $display("ERROR: %0d acks seen for %0d rows", acks, 7 + 24 + 20); errors++; end
+        if (ps_viol != 0) begin $display("ERROR: %0d PSRAM protocol violations", ps_viol); errors++; end
 
         // ---- SRAM
         ram_op(1, 17'h00123, 16'hA55A, 2'b11, q, c);

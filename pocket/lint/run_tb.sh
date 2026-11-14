@@ -9,7 +9,8 @@ mkdir -p "$out"
 verilator --binary --timing -j 0 -Wno-fatal -Wno-lint -Wno-style -Wno-MULTIDRIVEN \
   --top-module tb_shell -Mdir "$out" \
   "$here/tb_shell.sv" \
-  "$repo/third_party/pocket-utils/ip/mem/psram.sv" \
-  "$fpga/core/pocket_fb_psram.sv" "$fpga/core/pocket_sram.sv" "$fpga/core/pocket_video.sv" \
+  "$repo/sim/models/psram_model.sv" \
+  "$fpga/core/pocket_fb_burst.sv" "$fpga/core/pocket_psram_rows.sv" \
+  "$fpga/core/pocket_sram.sv" "$fpga/core/pocket_video.sv" \
   > "$out/build.log" 2>&1 || { tail -40 "$out/build.log"; exit 1; }
 "$out/Vtb_shell"

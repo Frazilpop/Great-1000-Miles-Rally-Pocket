@@ -27,6 +27,19 @@ foreach {name c} [list core $clk_core sdram $clk_sdram sdram_ps $clk_sdram_ps \
     }
 }
 
+# Hold between clk_core and clk_sdram, for the fitter only. The two are 2:1
+# from one PLL and the analyser puts their edges 1 ps apart, so every 48/96
+# path's hold is a race the fitter fixes with routing delay; its own estimate
+# of that delay can come out a picosecond short of quartus_sta's (14 Nov: the
+# tile ROM's tag into kaneko_sdram's address, -0.001 ns at the fast 0 C
+# corner, after the PSRAM servants moved to clk_sdram). 50 ps more hold
+# uncertainty while fitting asks for a margin the analyser then sees; the
+# analyser's own figures are left as they are.
+if {$::quartus(nameofexecutable) == "quartus_fit"} {
+    set_clock_uncertainty -hold -add -from $clk_core  -to $clk_sdram 0.050
+    set_clock_uncertainty -hold -add -from $clk_sdram -to $clk_core  0.050
+}
+
 # The SDRAM clock as the device sees it: clk_sdram_ps, forwarded through the
 # DDIO output register in core_top (pin_ddio_clk, data 1/0) to the dram_clk
 # pin. Quartus traces the path from the PLL counter through the I/O cell, so
@@ -110,11 +123,21 @@ set_false_path -to [get_ports {dram_cke}]
 
 # ------------------------------------------------------------ SRAM, PSRAM
 #
-# Asynchronous parts: there is no clock at the device to time against, so the
-# servants hold every signal for whole 48 MHz cycles and sample with at least
-# a cycle of margin, and the numbers are written down beside the state
-# machines (pocket_sram.sv; pocket_fb_psram.sv and agg23's psram.sv). The
-# fitter is told not to second-guess them.
+# The SRAM is an asynchronous part: there is no clock at the device to time
+# against, so its servant holds every signal for whole 48 MHz cycles and
+# samples with at least a cycle of margin, the numbers written down beside
+# the state machine (pocket_sram.sv).
+#
+# The PSRAMs are clocked at 48 MHz by a register toggling beside the other
+# pins (pocket_psram_rows, on clk_sdram): every pin changes a whole 96 MHz
+# period (10.4 ns) before the part samples it on cram_clk's rise and holds
+# 10.4 ns after, against the part's 3 ns setup and 2 ns hold, and read data
+# is captured 20.8 ns after the edge that launched the rise, inside a window
+# from about 9 ns + the round trip to 22.8 ns + the round trip. Those margins
+# are cycles, not picoseconds; the latencies are measured on the part at
+# power-up and shown on the overlay.
+#
+# The fitter is told not to second-guess either.
 set_false_path -to   [get_ports {sram_a[*] sram_dq[*] sram_oe_n sram_we_n sram_ub_n sram_lb_n}]
 set_false_path -from [get_ports {sram_dq[*]}]
 set_false_path -to   [get_ports {cram0_* cram1_*}]

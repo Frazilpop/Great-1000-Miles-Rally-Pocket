@@ -23,11 +23,11 @@ verilator --lint-only -Wall --top-module core_top \
   "$fpga/core/mf_pllbase.v" "$fpga/core/mf_pllbase/mf_pllbase_0002.v" \
   "$fpga/core/pin_ddio_clk.v" \
   "$fpga/core/core_bridge_cmd.v" \
-  "$tp/data_loader.sv" "$tp/sync_fifo.sv" "$tp/sound_i2s.sv" "$tp/mem/psram.sv" \
+  "$tp/data_loader.sv" "$tp/sync_fifo.sv" "$tp/sound_i2s.sv" \
   "$repo/rtl/mem/kaneko_sdram.sv" "$repo/rtl/mem/kaneko_sdram_x2.sv" \
   "$board" \
   "$fpga/core/pocket_sync.sv" "$fpga/core/pocket_rom_loader.sv" \
-  "$fpga/core/pocket_sram.sv" "$fpga/core/pocket_fb_psram.sv" \
+  "$fpga/core/pocket_sram.sv" "$fpga/core/pocket_fb_burst.sv" "$fpga/core/pocket_psram_rows.sv" \
   "$fpga/core/pocket_video.sv" "$fpga/core/pocket_diag.sv" "$fpga/core/pocket_nvram.sv" "$fpga/core/pocket_state.sv" \
   "$fpga/core/pocket_analogizer.sv" $(ls "$fpga"/analogizer/*.v "$fpga"/analogizer/*.sv | grep -v scandoubler.v) \
   "$anz_sd" \

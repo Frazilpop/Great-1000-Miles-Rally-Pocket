@@ -27,8 +27,15 @@ verilator --cc --build -j 0 -O2 --x-assign fast --x-initial 0 \
   -CFLAGS -O2 pocket/src/fpga/core/pocket_state.sv third_party/pocket-utils/ip/data_loader.sv \
   sim/gtmr/dcfifo.sv pocket/src/fpga/apf/common.v > "$O/bridge.log" 2>&1 ||
   { grep -E '%Error' "$O/bridge.log" | head -20; exit 1; }
-LIBS="$PWD/$O/bridge/Vbridge__ALL.a"
-INC="-I$PWD/$O/bridge"
+# The shell's sprite-bitmap servants on PSRAM models, for --fb-rtl: a model
+# of their own, on clk_sdram's two edges a board clock.
+verilator --cc --build -j 0 -O2 --x-assign fast --x-initial 0 \
+  -Wno-fatal -Wno-lint -Wno-style --prefix Vfb --top-module fb_top -Mdir "$O/fb" \
+  -CFLAGS -O2 sim/gtmr/fb_top.sv pocket/src/fpga/core/pocket_fb_burst.sv \
+  pocket/src/fpga/core/pocket_psram_rows.sv sim/models/psram_model.sv > "$O/fb.log" 2>&1 ||
+  { grep -E '%Error' "$O/fb.log" | head -20; exit 1; }
+LIBS="$PWD/$O/bridge/Vbridge__ALL.a $PWD/$O/fb/Vfb__ALL.a"
+INC="-I$PWD/$O/bridge -I$PWD/$O/fb"
 DEFS=""
 if [ $anz = 1 ]; then
   A=pocket/src/fpga/analogizer

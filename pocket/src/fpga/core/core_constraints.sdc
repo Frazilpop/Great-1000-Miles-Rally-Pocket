@@ -32,12 +32,14 @@ foreach {name c} [list core $clk_core sdram $clk_sdram sdram_ps $clk_sdram_ps \
 # path's hold is a race the fitter fixes with routing delay; its own estimate
 # of that delay can come out a picosecond short of quartus_sta's (14 Nov: the
 # tile ROM's tag into kaneko_sdram's address, -0.001 ns at the fast 0 C
-# corner, after the PSRAM servants moved to clk_sdram). 50 ps more hold
-# uncertainty while fitting asks for a margin the analyser then sees; the
-# analyser's own figures are left as they are.
+# corner, after the PSRAM servants moved to clk_sdram; 15 Nov: kaneko_sdram's
+# read data into the tile ROM's line registers, -0.097 ns at the fast 0 C
+# corner with 50 ps asked for). 150 ps more hold uncertainty while fitting
+# asks for a margin the analyser then sees; the analyser's own figures are
+# left as they are.
 if {$::quartus(nameofexecutable) == "quartus_fit"} {
-    set_clock_uncertainty -hold -add -from $clk_core  -to $clk_sdram 0.050
-    set_clock_uncertainty -hold -add -from $clk_sdram -to $clk_core  0.050
+    set_clock_uncertainty -hold -add -from $clk_core  -to $clk_sdram 0.150
+    set_clock_uncertainty -hold -add -from $clk_sdram -to $clk_core  0.150
 }
 
 # The SDRAM clock as the device sees it: clk_sdram_ps, forwarded through the

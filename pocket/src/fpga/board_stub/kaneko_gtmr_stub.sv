@@ -90,6 +90,7 @@ module kaneko_gtmr #(
     input  wire [15:0] dsw,
     input  wire        pause,
     input  wire        hide_speed_lines,
+    input  wire        smooth_top_speed,
 
     input  wire [5:0]  nv_addr,
     input  wire [15:0] nv_din,

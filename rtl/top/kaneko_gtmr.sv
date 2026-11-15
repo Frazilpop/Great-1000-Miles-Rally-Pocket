@@ -88,6 +88,8 @@ module kaneko_gtmr #(
 
     // Keeps the game from drawing its speed lines (see "Speed lines" below).
     input  wire        hide_speed_lines,
+    // Keeps the car's steps even at top speed (see "Top-speed shake" below).
+    input  wire        smooth_top_speed,
 
     // EEPROM backup
     input  wire [5:0]  nv_addr,
@@ -323,10 +325,31 @@ always_comb
     default: begin spdl_a0 = '1;             spdl_a1 = '1;             end
     endcase
 
+// ================================================================ top-speed shake
+// gtmre and gtmrusa shake the car at top speed: late in a stage from the
+// second on, going straight, with the speed word at 0xE00 or more, the car's
+// routine in IRQ4's work steps it three times its speed on one frame and back
+// once on the next, and sets a flag that moves the other objects with it
+// (gtmrusa 0x90cc, gtmre 0x90c0: CMPI.W #$E00,D0 then BCS past it). Every two
+// frames the car goes as far as without it, so the race is the same; an
+// arcade monitor blurs the two pictures, a sharp screen shows a shake.
+// Smoothing it answers that CMPI's immediate with 0xFFFF, as for the speed
+// lines: the branch is always taken, the flag stays clear, and the car steps
+// its speed every frame. gtmr, gtmr2 and gtmr2u step the car by its speed
+// alone, with nothing to smooth.
+logic [23:1] shk_a;
+always_comb
+    case (game)
+    3'd1:    shk_a = 23'h090c2 >> 1;   // gtmre
+    3'd2:    shk_a = 23'h090ce >> 1;   // gtmrusa
+    default: shk_a = '1;
+    endcase
+
 logic spdl_hit;
 always_ff @(posedge clk)
-    spdl_hit <= hide_speed_lines && (cpu_fc[1:0] == 2'b10) &&
-                (eab == spdl_a0 || eab == spdl_a1);
+    spdl_hit <= (cpu_fc[1:0] == 2'b10) &&
+                ((hide_speed_lines && (eab == spdl_a0 || eab == spdl_a1)) ||
+                 (smooth_top_speed && eab == shk_a));
 
 // A load's restore answers the 68000's reset vectors from the state.
 wire        ss_vec;

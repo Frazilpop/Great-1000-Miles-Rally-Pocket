@@ -398,6 +398,7 @@ wire [31:0] ss_bridge_rd;
 //   0xF1000014 [0]     diagnostic overlay (pocket_diag), see DIAGNOSTICS
 //   0xF1000018 [0]     hide the game's speed lines (kaneko_gtmr); no reset, so
 //                      it can be changed in the middle of a race
+//   0xF100001C [0]     smooth the top-speed shake (kaneko_gtmr); no reset
 //
 // The test switch (0xF1000004), service coin (0xF1000008) and SDRAM read
 // capture (0xF1000010) left the menu on 10 Oct 2026: Test Mode does what the
@@ -410,6 +411,7 @@ reg  [2:0]  game_74  = 3'd0;
 reg  [31:0] opt_74   = 32'd0;
 reg         diag_74  = 1'b0;
 reg         spdl_74  = 1'b0;
+reg         shk_74   = 1'b0;
 reg  [16:0] hrst_cnt = 17'd0;               //   1 ms at 74.25 MHz = 74,250
 wire        hrst_74  = (hrst_cnt != 17'd0);
 wire [31:0] opt_wr   = bridge_wr_data & OPT_MENU;
@@ -426,6 +428,7 @@ always @(posedge clk_74a) begin
         32'hF100000C: hrst_cnt <= 17'd74250;
         32'hF1000014: diag_74  <= bridge_wr_data[0];
         32'hF1000018: spdl_74  <= bridge_wr_data[0];
+        32'hF100001C: shk_74   <= bridge_wr_data[0];
         default: ;
         endcase
     end
@@ -439,6 +442,7 @@ always @(posedge clk_74a) begin
     32'hF1000000: bridge_rd_data <= opt_74;
     32'hF1000014: bridge_rd_data <= {31'd0, diag_74};
     32'hF1000018: bridge_rd_data <= {31'd0, spdl_74};
+    32'hF100001C: bridge_rd_data <= {31'd0, shk_74};
     32'hF8??????: bridge_rd_data <= cmd_bridge_rd_data;
     default:      bridge_rd_data <= 32'd0;
     endcase
@@ -643,12 +647,12 @@ core_bridge_cmd icb (
 // ======================================================= settings -> 48 MHz
 wire [2:0]  game;
 wire [15:0] dsw;
-wire        host_rst, diag_opt, hide_speed_lines;
+wire        host_rst, diag_opt, hide_speed_lines, smooth_top_speed;
 
-pocket_sync_bus #(.W(22), .INIT({3'd0, 16'hff00, 3'b000})) s_cfg48 (
+pocket_sync_bus #(.W(23), .INIT({3'd0, 16'hff00, 4'b0000})) s_cfg48 (
     .clk (clk_core),
-    .d   ({game_74, dsw_74, hrst_74, diag_74, spdl_74}),
-    .q   ({game,    dsw,    host_rst, diag_opt, hide_speed_lines})
+    .d   ({game_74, dsw_74, hrst_74, diag_74, spdl_74, shk_74}),
+    .q   ({game,    dsw,    host_rst, diag_opt, hide_speed_lines, smooth_top_speed})
 );
 
 // A save state's load keeps the Pocket's own reset off the board from the
@@ -1064,6 +1068,7 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
     .dsw        (dsw),
     .pause      (pause),
     .hide_speed_lines(hide_speed_lines),
+    .smooth_top_speed(smooth_top_speed),
 
     .nv_addr    (nv_addr),
     .nv_din     (nv_din),

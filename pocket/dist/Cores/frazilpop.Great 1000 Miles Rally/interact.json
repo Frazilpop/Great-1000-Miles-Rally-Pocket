@@ -27,6 +27,18 @@
                 "mask": "0xFFFFFFFE"
             },
             {
+                "name": "Smooth top speed",
+                "id": 17,
+                "type": "check",
+                "enabled": true,
+                "persist": true,
+                "address": "0xF100001C",
+                "defaultval": 0,
+                "value": "0x1",
+                "value_off": "0x0",
+                "mask": "0xFFFFFFFE"
+            },
+            {
                 "name": "Reset Game",
                 "id": 12,
                 "type": "action",

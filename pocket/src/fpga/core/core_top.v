@@ -1073,8 +1073,11 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
     .nv_dirty_clr(nv_dirty_clr),
 
     .diag_clr        (diag_clr),
-    .diag_wait_max   (diag_wait_max),
-    .diag_wait_addr  (diag_wait_addr),
+    .diag_long_hold  (diag_long_hold),
+    .diag_scr_stalls (diag_scr_stalls),
+    .diag_scr_jumps  (diag_scr_jumps),
+    .diag_irq4_line  (diag_irq4_line),
+    .diag_irq4_late  (diag_irq4_late),
     .diag_idle_min   (diag_idle_min),
     .diag_lag_frames (diag_lag_frames),
     .diag_draw_max   (diag_draw_max),
@@ -1109,13 +1112,23 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
 //   10-12 game id
 //   13 the 68000 has waited through a bus cycle longer than 65536 clocks
 //   14 a frame has passed with no spare 68000 time: the game's work for it
-//      ran past it, so the game fell a frame behind
-//   15 the KC-002 has missed a swap (overrun)
+//      ran past it, so the game fell a frame behind (counter 4's high half
+//      is not 0)
+//   15 the KC-002 has missed a swap (overrun; counter 5's low byte is not 0)
+// 13-15 are the board's counts as they stand, so a save state's load, which
+// resets the board's counters, clears them too.
 //
 // Counters (hex):
-//   0 longest 68000 bus cycle, in 48 MHz clocks (the sprite snapshot's hold
-//     gives ~00001000 in ordinary play; a held CPU shows millions)
-//   1 the byte address of that bus cycle (which device held it)
+//   0 the road's scroll (VIEW2 chip 0, layer 0, as latched at line 240):
+//     high half the frames it stood still after a frame it moved, low half
+//     the frames its step was over 1.5 times the last step that moved
+//     (a game that runs late loses the frame's movement and doesn't catch
+//     up: stalls; gtmrusa's own shake at top speed, three steps on and one
+//     back, counts a jump every second frame)
+//   1 high half: the latest line by which IRQ4's work (from line 64) had
+//     reached the idle loop, counted on past 0107 (263) if it ran into the
+//     next frame; low half: frames in which IRQ5 (line 224, which writes
+//     the scroll) was taken before IRQ4's work was done
 //   2 high half: the least spare time the 68000 had in a frame (in the
 //     program's idle loop), clocks / 64, so 3180 is a whole frame and 0 a
 //     frame it ran out of; low half: the longest KC-002 draw, clocks / 64
@@ -1129,9 +1142,11 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
 //     the read phase and the read latency (0x44 = write 4, read 4 phase 0)
 //   6 words 1,0 of line 0 as SDRAM reads them back    7 words 3,2 as read back
 //
-// Peaks and flags 13-15 hold until the overlay is turned OFF in the menu
-// (diag_clr), so the routine is: overlay on to see the baseline, off to
-// clear, play until the hitch, overlay on and photograph.
+// Peaks, counts and flags 13-15 hold until the overlay is turned OFF in the
+// menu (diag_clr), so the routine is: overlay on to see the baseline, off to
+// clear, play until the hitch, overlay on and photograph. The board's
+// counts (0, 1, 2, 4's high half, 5's low byte) also start again at a save
+// state's load; the frame after a clear, the menu or a load doesn't count.
 //
 // The read-back is port NP of the controller: once per frame, after
 // rom_loaded, it reads line 0 (the 68000's reset vector) and the overlay
@@ -1141,15 +1156,14 @@ wire        mem_ready_48;
 synch_3 s_memrdy48 (.i(mem_ready), .o(mem_ready_48), .clk(clk_core), .rise(), .fall());
 
 reg  [15:0] exp_w0 = 16'd0, exp_w1 = 16'd0, exp_w2 = 16'd0, exp_w3 = 16'd0;
-wire [31:0] diag_wait_max;
-wire [23:0] diag_wait_addr;
+wire        diag_long_hold;
+wire [15:0] diag_scr_stalls, diag_scr_jumps, diag_irq4_line, diag_irq4_late;
 wire [15:0] diag_idle_min, diag_lag_frames, diag_draw_max;
 wire [7:0]  diag_spr_overruns;
 reg         diag_opt_q = 1'b0;
 wire        diag_clr = diag_opt_q & ~diag_opt;    // overlay turned off
 reg  [31:0] w_rom4 = 32'd0, w_rom4_max = 32'd0, w_ram = 32'd0, w_ram_max = 32'd0;
 reg         rom4_req_q = 1'b0, ram_req_q = 1'b0;
-reg         f_wait = 1'b0, f_lag = 1'b0, f_over = 1'b0;
 reg  [63:0] rb_line = 64'd0;
 reg         rb_req  = 1'b0;
 reg         vb_q    = 1'b0;
@@ -1165,7 +1179,6 @@ always @(posedge clk_core) begin
     ram_req_q  <= ram_req;
     if (board_rst || diag_clr) begin
         w_rom4 <= 32'd0; w_rom4_max <= 32'd0; w_ram <= 32'd0; w_ram_max <= 32'd0;
-        f_wait <= 1'b0; f_lag <= 1'b0; f_over <= 1'b0;
     end else begin
         if (rom_req[4] && !rom4_req_q) w_rom4 <= 32'd1;
         else if (rom_req[4])           w_rom4 <= w_rom4 + 32'd1;
@@ -1173,9 +1186,6 @@ always @(posedge clk_core) begin
         if (ram_req && !ram_req_q) w_ram <= 32'd1;
         else if (ram_req)          w_ram <= w_ram + 32'd1;
         if (ram_req && w_ram > w_ram_max) w_ram_max <= w_ram;
-        if (diag_wait_max > 32'd65536)  f_wait  <= 1'b1;
-        if (diag_lag_frames != 16'd0)   f_lag   <= 1'b1;
-        if (diag_spr_overruns != 8'd0)  f_over  <= 1'b1;
     end
     if (dl_wr && dl_addr[24:3] == 22'd0) begin
         case (dl_addr[2:1])
@@ -1197,6 +1207,9 @@ always @(posedge clk_core) begin
     end
 end
 wire [63:0] exp_line = {exp_w3, exp_w2, exp_w1, exp_w0};
+wire        f_wait = diag_long_hold;
+wire        f_lag  = diag_lag_frames != 16'd0;
+wire        f_over = diag_spr_overruns != 8'd0;
 wire [15:0] diag_flags = {f_over, f_lag, f_wait, game, frame[5], diag_opt,
                           (rb_line == exp_line), board_rst, ldr_overflow, rom_loaded,
                           allcomplete_48, reset_n_48, mem_ready_48, locked_48};
@@ -1214,7 +1227,8 @@ pocket_diag u_diag (
               8'd0, fb_cal_fail1, fb_lats1, fb_cal_fail0, fb_lats0, diag_spr_overruns,
               diag_lag_frames, w_ram_max[15:0], w_rom4_max,
               diag_idle_min, diag_draw_max,
-              8'd0, diag_wait_addr, diag_wait_max}),
+              diag_irq4_line, diag_irq4_late,
+              diag_scr_stalls, diag_scr_jumps}),
     .r_out  (dr), .g_out (dg), .b_out (db)
 );
 

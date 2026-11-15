@@ -100,8 +100,11 @@ module kaneko_gtmr #(
     // Diagnostics for the platform's overlay: peaks since
     // diag_clr or reset. Nothing on the board depends on them.
     input  wire        diag_clr,
-    output wire [31:0] diag_wait_max,      // longest 68000 bus cycle, clocks AS low
-    output wire [23:0] diag_wait_addr,     // its byte address
+    output wire        diag_long_hold,     // a 68000 bus cycle has lasted over 65536 clocks
+    output wire [15:0] diag_scr_stalls,    // frames the road's scroll stood still after moving
+    output wire [15:0] diag_scr_jumps,     // frames its step was over 1.5 x the last one's
+    output wire [15:0] diag_irq4_line,     // latest line IRQ4's work reached the idle loop
+    output wire [15:0] diag_irq4_late,     // frames IRQ5 was taken before it got there
     output wire [15:0] diag_idle_min,      // least spare 68000 time in a frame, clocks / 64
     output wire [15:0] diag_lag_frames,    // frames with no spare 68000 time at all
     output wire [15:0] diag_draw_max,      // longest KC-002 draw, clocks / 64
@@ -265,6 +268,8 @@ wire [23:1] dbg_eab   /*verilator public_flat_rd*/ = eab;
 wire [15:0] dbg_dout  /*verilator public_flat_rd*/ = oEdb;
 wire [15:0] dbg_din   /*verilator public_flat_rd*/ = iEdb;
 wire [1:0]  dbg_ds    /*verilator public_flat_rd*/ = {~UDSn, ~LDSn};
+wire        dbg_iack  /*verilator public_flat_rd*/ = cpu_iack;
+wire [9:0]  dbg_vcnt  /*verilator public_flat_rd*/ = vcnt;
 
 // Scanlines of the three interrupts. MAME's values; the harness can move them
 // (+define+GTMR_IRQ4_LINE=..) to test timing hypotheses against MAME.
@@ -582,7 +587,7 @@ wire [63:0] lay_sy_live = { c1r1, c1r3, c0r1, c0r3 };
 wire frame_start = vbl_rise & ~ss_freeze;
 
 reg [3:0]  lay_en, lay_ls;
-reg [63:0] lay_sx, lay_sy;
+reg [63:0] lay_sx /*verilator public_flat_rd*/, lay_sy /*verilator public_flat_rd*/;
 wire       lay_we;
 always @(posedge clk) begin
     if (rst) begin
@@ -872,60 +877,127 @@ assign rom_addr[4] = p4_addr;
 
 // ================================================================ diagnostics
 // What a photograph of the overlay can say about a hitch in play: whether the
-// 68000 was HELD (a bus cycle of millions of clocks, and the address says by
-// what), how close the game came to running out of frame, and whether the
-// sprite engine fell behind (overruns, and the longest draw). Peaks hold
-// until diag_clr. A bus cycle is counted from AS going low, so the ordinary
-// peak is the sprite snapshot's hold, about 4100 clocks at a 400000 address.
+// 68000 was HELD (a bus cycle of over 65536 clocks), how close the game came
+// to running out of frame, whether the game's own frame ran late, whether
+// the road's scroll moved evenly, and whether the sprite engine fell behind
+// (overruns, and the longest draw). Peaks and counts hold until diag_clr; the
+// frame after a clear, a pause or a save state is partial and doesn't count.
 //
 // Spare time: each set's main program, once running, is one `bra.b *` and
 // the game happens in the interrupts. The clocks from a fetch there to the
 // next bus cycle anywhere else are the 68000's spare time; a frame with none
 // is one whose work ran past it, so the game falls a frame behind (MAME, a
 // gtmrusa race: a fifth of every frame spare).
-logic [31:0] dg_wait, dg_wait_max;
-logic [23:0] dg_wait_addr;
+//
+// The frame inside: IRQ4 (line 64) does the game's work and IRQ5 (224)
+// writes both VIEW2s' scroll for the latch at 240. If IRQ4's work ran past
+// IRQ5, IRQ5 would write the scroll it had and the road would stand still
+// a frame (the game doesn't catch up), while the 68000 still reached the
+// idle loop every frame. So: the line at which the 68000 first fetches the
+// idle loop after acknowledging IRQ4 (counted on past 263 if it runs into
+// the next frame), the frames in which IRQ5 was acknowledged before that, and from
+// the road's latched scroll (VIEW2 chip 0's layer 0, X and Y, 10.6 fixed
+// point) the frames it stood still after a frame it moved, and the frames
+// whose step (|dx| + |dy|) was over 1.5 times the last step that moved.
+// Both only once the step before is a pixel or more, so the start of a
+// race and a car at a crawl don't count. (gtmrusa and gtmre shake the car
+// on purpose at top speed late in a stage, three steps on and one back on
+// alternate frames: a jump every second frame, with no stall.)
+logic [16:0] dg_wait;
+logic        dg_long;
 logic [15:0] dg_idle_min, dg_lag_frames, dg_draw_max;
 logic [19:0] dg_idle;
 logic [7:0]  dg_over_base;   // KC-002 overruns at the last clear: the chip's count is since reset
 logic        dg_as_q, dg_armed, dg_idling;
+logic        dg_iack_q, dg_w4, dg_sc_ok;
+logic [9:0]  dg_vcnt_q;
+logic [15:0] dg_l4, dg_l4_max, dg_late4, dg_stalls, dg_jumps;
+logic [15:0] dg_sx_q, dg_sy_q;
+logic [16:0] dg_step_q, dg_step_nz;   // the last frame's step, and the last that wasn't 0
 wire         dg_as = ~ASn & ~cpu_iack;
 wire [23:1]  dg_ipc = (game == 3'd2) ? 23'h000585 :            // gtmrusa 000b0a
                       (game == 3'd3) ? 23'h000688 :            // gtmr2   000d10
                       (game == 3'd4) ? 23'h00069a : 23'h000572; // gtmr2u 000d34, gtmr/gtmre 000ae4
+wire         dg_idle_go = dg_as && !dg_as_q && eRWn && (eab == dg_ipc || eab == dg_ipc + 23'd1);
+wire         dg_ack4 = cpu_iack && !dg_iack_q && eab[3:1] == 3'd4;
+wire         dg_ack5 = cpu_iack && !dg_iack_q && eab[3:1] == 3'd5;
+wire  [15:0] dg_dx = lay_sx_live[15:0] - dg_sx_q;
+wire  [15:0] dg_dy = lay_sy_live[15:0] - dg_sy_q;
+wire  [15:0] dg_ax = dg_dx[15] ? 16'(-dg_dx) : dg_dx;
+wire  [15:0] dg_ay = dg_dy[15] ? 16'(-dg_dy) : dg_dy;
+wire  [16:0] dg_step = {1'b0, dg_ax} + {1'b0, dg_ay};
+wire         dg_count = dg_armed && !irq_hold;
 always_ff @(posedge clk) begin
-    dg_as_q <= dg_as;
+    dg_as_q   <= dg_as;
+    dg_iack_q <= cpu_iack;
+    dg_vcnt_q <= vcnt;
     if (cpu_rst || diag_clr) begin
-        dg_wait <= '0; dg_wait_max <= '0; dg_wait_addr <= '0;
+        dg_wait <= '0; dg_long <= 1'b0;
         dg_idle_min <= 16'hffff; dg_lag_frames <= '0; dg_draw_max <= '0;
         dg_idle <= '0; dg_idling <= 1'b0;
         dg_over_base <= spr_overruns;
         dg_armed <= 1'b0;
+        dg_w4 <= 1'b0; dg_l4 <= '0; dg_l4_max <= '0; dg_late4 <= '0;
+        dg_sc_ok <= 1'b0; dg_stalls <= '0; dg_jumps <= '0;
+        dg_step_q <= '0; dg_step_nz <= '0;
     end else begin
         if (dg_as && !dg_as_q) begin
-            dg_wait   <= 32'd1;
-            dg_idling <= eRWn && (eab == dg_ipc || eab == dg_ipc + 23'd1);
-        end else if (dg_as && dg_wait != 32'hffffffff) begin
-            dg_wait <= dg_wait + 32'd1;
+            dg_wait   <= 17'd1;
+            dg_idling <= dg_idle_go;
+        end else if (dg_as && dg_wait != 17'h1ffff) begin
+            dg_wait <= dg_wait + 17'd1;
         end
-        if (dg_as && dg_wait > dg_wait_max) begin
-            dg_wait_max  <= dg_wait;
-            dg_wait_addr <= {eab, 1'b0};
-        end
+        if (dg_as && dg_wait > 17'd65536) dg_long <= 1'b1;
         if (dg_idling && dg_idle != 20'hfffff) dg_idle <= dg_idle + 20'd1;
+        // IRQ4's work: from its acknowledge to the idle loop
+        if (irq_hold) begin
+            dg_w4 <= 1'b0;
+        end else begin
+            if (dg_ack4) begin
+                dg_w4 <= 1'b1;
+                dg_l4 <= {6'd0, vcnt};
+            end else if (dg_w4 && vcnt != dg_vcnt_q && dg_l4 != 16'hffff) begin
+                dg_l4 <= dg_l4 + 16'd1;
+            end
+            if (dg_w4 && dg_idle_go) begin
+                dg_w4 <= 1'b0;
+                if (dg_armed && dg_l4 > dg_l4_max) dg_l4_max <= dg_l4;
+            end
+            if (dg_ack5 && dg_w4 && dg_armed && dg_late4 != 16'hffff) dg_late4 <= dg_late4 + 16'd1;
+        end
         if (vbl_rise) begin
             dg_idle  <= '0;
-            dg_armed <= ~irq_hold;   // the first frame after a clear, a pause or a save state is partial
-            if (dg_armed && !irq_hold) begin
+            dg_armed <= ~irq_hold;
+            if (dg_count) begin
                 if ({2'b00, dg_idle[19:6]} < dg_idle_min) dg_idle_min <= {2'b00, dg_idle[19:6]};
                 if (dg_idle == '0 && dg_lag_frames != 16'hffff) dg_lag_frames <= dg_lag_frames + 16'd1;
+            end
+            // the road's scroll, as the latch takes it this edge
+            dg_sx_q <= lay_sx_live[15:0];
+            dg_sy_q <= lay_sy_live[15:0];
+            dg_sc_ok <= dg_count;
+            if (dg_count) begin
+                dg_step_q <= dg_step;
+                if (dg_step != 17'd0) dg_step_nz <= dg_step;
+                if (dg_sc_ok) begin
+                    if (dg_step == 17'd0 && dg_step_q >= 17'h40 && dg_stalls != 16'hffff)
+                        dg_stalls <= dg_stalls + 16'd1;
+                    if (dg_step_nz >= 17'h40 && {dg_step, 1'b0} > 18'(dg_step_nz) * 18'd3
+                        && dg_jumps != 16'hffff)
+                        dg_jumps <= dg_jumps + 16'd1;
+                end
+            end else begin
+                dg_step_q <= '0; dg_step_nz <= '0;
             end
         end
         if (spr_draw_clocks > dg_draw_max) dg_draw_max <= spr_draw_clocks;
     end
 end
-assign diag_wait_max     = dg_wait_max;
-assign diag_wait_addr    = dg_wait_addr;
+assign diag_long_hold    = dg_long;
+assign diag_scr_stalls   = dg_stalls;
+assign diag_scr_jumps    = dg_jumps;
+assign diag_irq4_line    = dg_l4_max;
+assign diag_irq4_late    = dg_late4;
 assign diag_idle_min     = dg_idle_min;
 assign diag_lag_frames   = dg_lag_frames;
 assign diag_draw_max     = dg_draw_max;

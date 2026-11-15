@@ -29,8 +29,10 @@
 // stats.csv: frame, sprite draw clocks (/64), overruns so far, cycles, 68000
 // bus cycles and AS clocks in the frame, the KC-002's capture and shown tags,
 // the longest bus cycle (clocks AS to DTACK) and its byte address, the
-// clocks spent waiting beyond a no-wait cycle, the draw's split, and the
-// clocks the 68000 sat in the program's idle loop (its spare time).
+// clocks spent waiting beyond a no-wait cycle, the draw's split, the
+// clocks the 68000 sat in the program's idle loop (its spare time), the
+// line IRQ4's work reached the idle loop (-1 none this frame) and whether
+// IRQ5 came first, and the four layers' latched scroll X and Y (hex).
 //
 // --inputs takes tools/mame_gtmr_io_profile.lua's plan file ("<frame>
 // coin=1 b2=1 right=0 ..."), so a race can be played the same way in MAME
@@ -374,7 +376,7 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks,draw_busy,w_psram,w_starved,f_rom,idle\n");
+    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks,draw_busy,w_psram,w_starved,f_rom,idle,irq4_end,irq5_early,sx0,sy0,sx1,sy1,sx2,sy2,sx3,sy3\n");
     // The draw's clocks this frame: busy at all, the writer waiting on a
     // PSRAM row, the writer idle with nothing to write, the fetcher waiting
     // on the sprite ROM.
@@ -486,6 +488,8 @@ int main(int argc, char** argv) {
     const uint32_t ipc = idle_pc[(game >= 0 && game < 5) ? game : 0];
     uint64_t idle = 0, idle_t0 = 0;
     bool idling = false;
+    bool iack_prev = false, as_prev2 = false, w4 = false;
+    int  vcnt_prev = 0, l4 = 0, irq4_end = -1, irq5_early = 0;
     bool as_prev = false;
 
     // ------------------------------------------------------- save states
@@ -917,6 +921,26 @@ int main(int argc, char** argv) {
             if (!as) waiting = false;
             as_prev = as;
         }
+        // IRQ4's work, from its acknowledge to the first fetch at the idle
+        // loop, in lines (on past 263 if it runs into the next frame), and
+        // whether IRQ5 was acknowledged first: the board's own counters'
+        // question, answered here apart from them
+        {
+            bool ia = R.kaneko_gtmr__DOT__dbg_iack;
+            int  lv = (R.kaneko_gtmr__DOT__dbg_eab) & 7;
+            int  vc = R.kaneko_gtmr__DOT__dbg_vcnt;
+            if (ia && !iack_prev) {
+                if (lv == 4) { w4 = true; l4 = vc; }
+                else if (lv == 5 && w4) irq5_early++;
+            }
+            if (w4 && vc != vcnt_prev) l4++;
+            bool as2 = R.kaneko_gtmr__DOT__dbg_as;
+            if (w4 && as2 && !as_prev2 && R.kaneko_gtmr__DOT__dbg_rw) {
+                uint32_t a = (uint32_t)R.kaneko_gtmr__DOT__dbg_eab << 1;
+                if (a == ipc || a == ipc + 2) { w4 = false; if (l4 > irq4_end) irq4_end = l4; }
+            }
+            iack_prev = ia; vcnt_prev = vc; as_prev2 = as2;
+        }
         // ---- bus monitor: random replay and trace, at the clock DTACK is
         // first asserted for a bus cycle
         {
@@ -974,7 +998,7 @@ int main(int argc, char** argv) {
                     fwrite(sprimg.data(), 2, sprimg.size(), f);
                     fclose(f);
                 }
-                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n", frame,
+                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,%d,%04x,%04x,%04x,%04x,%04x,%04x,%04x,%04x\n", frame,
                         (unsigned)R.kaneko_gtmr__DOT__spr_draw_clocks,
                         (unsigned)R.kaneko_gtmr__DOT__spr_overruns,
                         (unsigned long long)cyc,
@@ -988,7 +1012,13 @@ int main(int argc, char** argv) {
                         (unsigned long long)late_spr, (unsigned long long)max_spr,
                         (unsigned long long)d_busy, (unsigned long long)d_wps,
                         (unsigned long long)d_wst, (unsigned long long)d_rom,
-                        (unsigned long long)(idle + (idling ? cyc - idle_t0 : 0)));
+                        (unsigned long long)(idle + (idling ? cyc - idle_t0 : 0)),
+                        irq4_end, irq5_early,
+                        (unsigned)(R.kaneko_gtmr__DOT__lay_sx & 0xffff), (unsigned)(R.kaneko_gtmr__DOT__lay_sy & 0xffff),
+                        (unsigned)((R.kaneko_gtmr__DOT__lay_sx >> 16) & 0xffff), (unsigned)((R.kaneko_gtmr__DOT__lay_sy >> 16) & 0xffff),
+                        (unsigned)((R.kaneko_gtmr__DOT__lay_sx >> 32) & 0xffff), (unsigned)((R.kaneko_gtmr__DOT__lay_sy >> 32) & 0xffff),
+                        (unsigned)((R.kaneko_gtmr__DOT__lay_sx >> 48) & 0xffff), (unsigned)((R.kaneko_gtmr__DOT__lay_sy >> 48) & 0xffff));
+                irq4_end = -1; irq5_early = 0;
                 d_busy = d_wps = d_wst = d_rom = 0;
                 idle = 0; if (idling) idle_t0 = cyc;
                 late_lines = 0; max_line = 0; late_spr = 0; max_spr = 0;
@@ -1036,6 +1066,10 @@ int main(int argc, char** argv) {
     if (fbm) fprintf(stderr, "PSRAM protocol violations: %u\n", (unsigned)fbm->violations);
     fprintf(stderr, "overlay: least spare time %u x 64 clocks, frames with none %u\n",
             (unsigned)t->diag_idle_min, (unsigned)t->diag_lag_frames);
+    fprintf(stderr, "overlay: road scroll stalls %u, jumps %u; IRQ4 done by line %u at the latest, "
+            "IRQ5 before it %u; a bus cycle over 65536 clocks %u\n",
+            (unsigned)t->diag_scr_stalls, (unsigned)t->diag_scr_jumps, (unsigned)t->diag_irq4_line,
+            (unsigned)t->diag_irq4_late, (unsigned)t->diag_long_hold);
 #ifdef ANALOGIZER
     if (anz_keys) fclose(anz_keys);
     fprintf(stderr, "analogizer: word taken %08x; pins off the template's on %llu of %llu edges with it off; "

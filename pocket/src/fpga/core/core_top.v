@@ -1075,7 +1075,8 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
     .diag_clr        (diag_clr),
     .diag_wait_max   (diag_wait_max),
     .diag_wait_addr  (diag_wait_addr),
-    .diag_stall_frames(diag_stall_frames),
+    .diag_idle_min   (diag_idle_min),
+    .diag_lag_frames (diag_lag_frames),
     .diag_draw_max   (diag_draw_max),
 
     .ss_save    (ss_save),
@@ -1107,17 +1108,21 @@ kaneko_gtmr #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
 //   8 overlay option on     9 blinks about once a second (frame counter)
 //   10-12 game id
 //   13 the 68000 has waited through a bus cycle longer than 65536 clocks
-//   14 a frame has passed with the 68000 completing fewer than 8192 bus cycles
+//   14 a frame has passed with no spare 68000 time: the game's work for it
+//      ran past it, so the game fell a frame behind
 //   15 the KC-002 has missed a swap (overrun)
 //
 // Counters (hex):
 //   0 longest 68000 bus cycle, in 48 MHz clocks (the sprite snapshot's hold
 //     gives ~00001000 in ordinary play; a held CPU shows millions)
 //   1 the byte address of that bus cycle (which device held it)
-//   2 high half: frames in which the 68000 completed fewer than 8192 bus
-//     cycles; low half: the longest KC-002 draw, clocks / 64
+//   2 high half: the least spare time the 68000 had in a frame (in the
+//     program's idle loop), clocks / 64, so 3180 is a whole frame and 0 a
+//     frame it ran out of; low half: the longest KC-002 draw, clocks / 64
 //   3 longest wait on SDRAM port 4 (68000 ROM line), request to ack, clocks
-//   4 longest wait on the SRAM (68000 external RAM), request to ack, clocks
+//   4 high half: frames with no spare 68000 time (flag 14's count); low
+//     half: the longest wait on the SRAM (68000 external RAM), request to
+//     ack, clocks
 //   5 low byte: KC-002 overruns (draws that missed their swap); above it
 //     the PSRAMs' boot measurements, chip 1 then chip 0, each a hex digit
 //     pair: bit 7 of the pair calibration failed, then the write latency,
@@ -1138,13 +1143,13 @@ synch_3 s_memrdy48 (.i(mem_ready), .o(mem_ready_48), .clk(clk_core), .rise(), .f
 reg  [15:0] exp_w0 = 16'd0, exp_w1 = 16'd0, exp_w2 = 16'd0, exp_w3 = 16'd0;
 wire [31:0] diag_wait_max;
 wire [23:0] diag_wait_addr;
-wire [15:0] diag_stall_frames, diag_draw_max;
+wire [15:0] diag_idle_min, diag_lag_frames, diag_draw_max;
 wire [7:0]  diag_spr_overruns;
 reg         diag_opt_q = 1'b0;
 wire        diag_clr = diag_opt_q & ~diag_opt;    // overlay turned off
 reg  [31:0] w_rom4 = 32'd0, w_rom4_max = 32'd0, w_ram = 32'd0, w_ram_max = 32'd0;
 reg         rom4_req_q = 1'b0, ram_req_q = 1'b0;
-reg         f_wait = 1'b0, f_stall = 1'b0, f_over = 1'b0;
+reg         f_wait = 1'b0, f_lag = 1'b0, f_over = 1'b0;
 reg  [63:0] rb_line = 64'd0;
 reg         rb_req  = 1'b0;
 reg         vb_q    = 1'b0;
@@ -1160,7 +1165,7 @@ always @(posedge clk_core) begin
     ram_req_q  <= ram_req;
     if (board_rst || diag_clr) begin
         w_rom4 <= 32'd0; w_rom4_max <= 32'd0; w_ram <= 32'd0; w_ram_max <= 32'd0;
-        f_wait <= 1'b0; f_stall <= 1'b0; f_over <= 1'b0;
+        f_wait <= 1'b0; f_lag <= 1'b0; f_over <= 1'b0;
     end else begin
         if (rom_req[4] && !rom4_req_q) w_rom4 <= 32'd1;
         else if (rom_req[4])           w_rom4 <= w_rom4 + 32'd1;
@@ -1169,7 +1174,7 @@ always @(posedge clk_core) begin
         else if (ram_req)          w_ram <= w_ram + 32'd1;
         if (ram_req && w_ram > w_ram_max) w_ram_max <= w_ram;
         if (diag_wait_max > 32'd65536)  f_wait  <= 1'b1;
-        if (diag_stall_frames != 16'd0) f_stall <= 1'b1;
+        if (diag_lag_frames != 16'd0)   f_lag   <= 1'b1;
         if (diag_spr_overruns != 8'd0)  f_over  <= 1'b1;
     end
     if (dl_wr && dl_addr[24:3] == 22'd0) begin
@@ -1192,7 +1197,7 @@ always @(posedge clk_core) begin
     end
 end
 wire [63:0] exp_line = {exp_w3, exp_w2, exp_w1, exp_w0};
-wire [15:0] diag_flags = {f_over, f_stall, f_wait, game, frame[5], diag_opt,
+wire [15:0] diag_flags = {f_over, f_lag, f_wait, game, frame[5], diag_opt,
                           (rb_line == exp_line), board_rst, ldr_overflow, rom_loaded,
                           allcomplete_48, reset_n_48, mem_ready_48, locked_48};
 wire [7:0]  dr, dg, db, mr, mg, mb;
@@ -1207,8 +1212,8 @@ pocket_diag u_diag (
     .flags  (diag_flags),
     .cnt    ({rb_line[63:32], rb_line[31:0],
               8'd0, fb_cal_fail1, fb_lats1, fb_cal_fail0, fb_lats0, diag_spr_overruns,
-              w_ram_max, w_rom4_max,
-              diag_stall_frames, diag_draw_max,
+              diag_lag_frames, w_ram_max[15:0], w_rom4_max,
+              diag_idle_min, diag_draw_max,
               8'd0, diag_wait_addr, diag_wait_max}),
     .r_out  (dr), .g_out (dg), .b_out (db)
 );

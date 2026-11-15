@@ -102,7 +102,8 @@ module kaneko_gtmr #(
     input  wire        diag_clr,
     output wire [31:0] diag_wait_max,      // longest 68000 bus cycle, clocks AS low
     output wire [23:0] diag_wait_addr,     // its byte address
-    output wire [15:0] diag_stall_frames,  // frames with fewer than 8192 bus cycles
+    output wire [15:0] diag_idle_min,      // least spare 68000 time in a frame, clocks / 64
+    output wire [15:0] diag_lag_frames,    // frames with no spare 68000 time at all
     output wire [15:0] diag_draw_max,      // longest KC-002 draw, clocks / 64
     output wire [7:0]  diag_spr_overruns,  // KC-002 draws that missed their swap
 
@@ -396,7 +397,8 @@ kaneko_gtmr_bus #(.SDR_AW(SDR_AW)) u_bus
 
     .in_p1(in_p1), .in_p2(in_p2), .in_sys(in_sys), .in_unk(in_unk),
     .disp_enable(disp_enable), .unmapped_hit(),
-    .idle(bus_idle), .cinval(ss_cinval), .de_we(de_we), .de_d(aux_d)
+    .idle(bus_idle), .pf_stop(ss_park68 | ss_freeze), .cinval(ss_cinval),
+    .de_we(de_we), .de_d(aux_d)
 );
 
 // ================================================================ TOYBOX
@@ -871,28 +873,38 @@ assign rom_addr[4] = p4_addr;
 // ================================================================ diagnostics
 // What a photograph of the overlay can say about a hitch in play: whether the
 // 68000 was HELD (a bus cycle of millions of clocks, and the address says by
-// what), whether it ran but got nowhere (a frame with fewer than 8192 bus
-// cycles, against ~53K for a free-running one), and whether the sprite
-// engine fell behind (overruns, and the longest draw). Peaks hold until
-// diag_clr. A bus cycle is counted from AS going low, so the ordinary peak is
-// the sprite snapshot's hold, about 4100 clocks at a 400000 address.
+// what), how close the game came to running out of frame, and whether the
+// sprite engine fell behind (overruns, and the longest draw). Peaks hold
+// until diag_clr. A bus cycle is counted from AS going low, so the ordinary
+// peak is the sprite snapshot's hold, about 4100 clocks at a 400000 address.
+//
+// Spare time: each set's main program, once running, is one `bra.b *` and
+// the game happens in the interrupts. The clocks from a fetch there to the
+// next bus cycle anywhere else are the 68000's spare time; a frame with none
+// is one whose work ran past it, so the game falls a frame behind (MAME, a
+// gtmrusa race: a fifth of every frame spare).
 logic [31:0] dg_wait, dg_wait_max;
 logic [23:0] dg_wait_addr;
-logic [15:0] dg_cycles, dg_stall_frames, dg_draw_max;
+logic [15:0] dg_idle_min, dg_lag_frames, dg_draw_max;
+logic [19:0] dg_idle;
 logic [7:0]  dg_over_base;   // KC-002 overruns at the last clear: the chip's count is since reset
-logic        dg_as_q, dg_armed;
+logic        dg_as_q, dg_armed, dg_idling;
 wire         dg_as = ~ASn & ~cpu_iack;
+wire [23:1]  dg_ipc = (game == 3'd2) ? 23'h000585 :            // gtmrusa 000b0a
+                      (game == 3'd3) ? 23'h000688 :            // gtmr2   000d10
+                      (game == 3'd4) ? 23'h00069a : 23'h000572; // gtmr2u 000d34, gtmr/gtmre 000ae4
 always_ff @(posedge clk) begin
     dg_as_q <= dg_as;
     if (cpu_rst || diag_clr) begin
         dg_wait <= '0; dg_wait_max <= '0; dg_wait_addr <= '0;
-        dg_cycles <= '0; dg_stall_frames <= '0; dg_draw_max <= '0;
+        dg_idle_min <= 16'hffff; dg_lag_frames <= '0; dg_draw_max <= '0;
+        dg_idle <= '0; dg_idling <= 1'b0;
         dg_over_base <= spr_overruns;
         dg_armed <= 1'b0;
     end else begin
         if (dg_as && !dg_as_q) begin
-            dg_wait <= 32'd1;
-            if (dg_cycles != 16'hffff) dg_cycles <= dg_cycles + 16'd1;
+            dg_wait   <= 32'd1;
+            dg_idling <= eRWn && (eab == dg_ipc || eab == dg_ipc + 23'd1);
         end else if (dg_as && dg_wait != 32'hffffffff) begin
             dg_wait <= dg_wait + 32'd1;
         end
@@ -900,18 +912,22 @@ always_ff @(posedge clk) begin
             dg_wait_max  <= dg_wait;
             dg_wait_addr <= {eab, 1'b0};
         end
+        if (dg_idling && dg_idle != 20'hfffff) dg_idle <= dg_idle + 20'd1;
         if (vbl_rise) begin
-            dg_cycles <= '0;
-            dg_armed  <= ~irq_hold;   // the first frame after a clear, a pause or a save state is partial
-            if (dg_armed && !irq_hold && dg_cycles < 16'd8192 && dg_stall_frames != 16'hffff)
-                dg_stall_frames <= dg_stall_frames + 16'd1;
+            dg_idle  <= '0;
+            dg_armed <= ~irq_hold;   // the first frame after a clear, a pause or a save state is partial
+            if (dg_armed && !irq_hold) begin
+                if ({2'b00, dg_idle[19:6]} < dg_idle_min) dg_idle_min <= {2'b00, dg_idle[19:6]};
+                if (dg_idle == '0 && dg_lag_frames != 16'hffff) dg_lag_frames <= dg_lag_frames + 16'd1;
+            end
         end
         if (spr_draw_clocks > dg_draw_max) dg_draw_max <= spr_draw_clocks;
     end
 end
 assign diag_wait_max     = dg_wait_max;
 assign diag_wait_addr    = dg_wait_addr;
-assign diag_stall_frames = dg_stall_frames;
+assign diag_idle_min     = dg_idle_min;
+assign diag_lag_frames   = dg_lag_frames;
 assign diag_draw_max     = dg_draw_max;
 assign diag_spr_overruns = spr_overruns - dg_over_base;
 

@@ -102,7 +102,8 @@ module kaneko_gtmr #(
     input  wire        diag_clr,
     output wire [31:0] diag_wait_max,
     output wire [23:0] diag_wait_addr,
-    output wire [15:0] diag_stall_frames,
+    output wire [15:0] diag_idle_min,
+    output wire [15:0] diag_lag_frames,
     output wire [15:0] diag_draw_max,
     output wire [7:0]  diag_spr_overruns,
 
@@ -118,7 +119,7 @@ module kaneko_gtmr #(
     input  wire [15:0] ss_di
 );
 assign diag_wait_max = 32'd0; assign diag_wait_addr = 24'd0;
-assign diag_stall_frames = 16'd0; assign diag_draw_max = 16'd0;
+assign diag_idle_min = 16'd0; assign diag_lag_frames = 16'd0; assign diag_draw_max = 16'd0;
 assign diag_spr_overruns = 8'd0;
 assign ss_status = 2'd3; assign ss_loading = 1'b0; assign ss_refused = 1'b1; assign ss_do = 16'd0;   // no save states
 wire unused_diag_clr = diag_clr;

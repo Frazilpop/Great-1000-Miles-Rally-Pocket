@@ -5,7 +5,7 @@
 // input words and the wheel read return, so one decoder serves both and
 // `map2` picks the input wiring.
 //
-//   000000-0ffffd  ROM              SDRAM through a line cache (as kaneko_bus)
+//   000000-0ffffd  ROM              SDRAM through a line cache with prefetch
 //   0ffffe-0fffff  wheel            0x00ff in joystick mode (gtmr), 0xffff (gtmr2)
 //   100000-10ffff  work RAM         on-chip
 //   200000-20ffff  MCU-shared RAM   external SRAM words 0x00000-0x07fff
@@ -36,7 +36,7 @@
 
 module kaneko_gtmr_bus #(
     parameter int unsigned SDR_AW    = 25,
-    parameter int unsigned ROM_LINES = 16
+    parameter int unsigned ROM_LINES = 256
 )(
     input  wire        clk,
     input  wire        rst,
@@ -103,8 +103,10 @@ module kaneko_gtmr_bus #(
     output logic        unmapped_hit,
 
     // Save states (kaneko_state): idle with nothing asked of the ROM or the
-    // SRAM; the line cache emptied; the display enable put back.
+    // SRAM; no prefetch started while the 68000 is parked or frozen; the
+    // line cache emptied; the display enable put back.
     output wire         idle,
+    input  wire         pf_stop,
     input  wire         cinval,
     input  wire         de_we,
     input  wire  [15:0] de_d
@@ -178,23 +180,102 @@ module kaneko_gtmr_bus #(
     wire [16:0] ext_addr = a[17:1];
 
     // ---------------------------------------------------------- the cache
-    // As kaneko_bus: direct-mapped, 64-bit lines, ROM at SDRAM word 0.
+    // The arcade's 68000 reads its ROM with no wait. Here a line not in the
+    // cache costs an SDRAM burst, and in a race the program and its tables
+    // stream through: with sixteen lines one read in five missed (MAME's
+    // fetches, gtmrusa's race), enough to lose a fifth of a frame. So: 256
+    // direct-mapped 64-bit lines in block RAM, and a tagged next-line
+    // prefetch. A line filled by a miss asks for the line after it; so does
+    // the first hit on a line the prefetch filled, so a run of code or a table
+    // read in order stays a line ahead. The prefetch runs while the 68000
+    // goes on with hits and every other device; only a miss, or a TOYBOX
+    // command (which takes the ROM port), waits for it to land.
+    //
+    // ROM is 000000-0fffff, so a line is word address [19:3] of it: an index
+    // and a tag. Each line's tag and data are one word of `cmem`, read on
+    // the 68000's address every clock: the address is out a clock or more
+    // before AS, so on the clock the FSM sees the cycle, cq already holds its
+    // line. A second copy of the tags (`ptags`) is read by the prefetch, to
+    // leave a line already there alone. A clock that writes either RAM makes
+    // its next q unsure (`cq_ok`, `pq_ok`): it is read again.
     localparam int unsigned IDXW  = $clog2(ROM_LINES);
     localparam int unsigned TAGLO = 3 + IDXW;
-    logic [63:0]          cdata  [0:ROM_LINES-1];
-    logic [SDR_AW:TAGLO]  ctag   [0:ROM_LINES-1];
-    logic [ROM_LINES-1:0] cvalid;
-    wire [SDR_AW:1]   rom_wa   = SDR_AW'(a[23:1]);
-    wire [IDXW-1:0]   cidx     = rom_wa[TAGLO-1:3];
-    wire              line_hit = cvalid[cidx] && (ctag[cidx] == rom_wa[SDR_AW:TAGLO]);
-    wire [1:0]        lane     = rom_wa[2:1];
-    wire [15:0]       line_word  = cdata[cidx][{lane, 4'd0} +: 16];
-    wire [15:0]       burst_word = rom_dout[{lane, 4'd0} +: 16];
+    localparam int unsigned TAGW  = 20 - TAGLO;
+    typedef logic [19:3] line_t;
+
+    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW+63:0] cmem  [0:ROM_LINES-1];
+    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW-1:0]  ptags [0:ROM_LINES-1];
+    logic [ROM_LINES-1:0] cvalid;      // the line holds what its tag says
+    logic [ROM_LINES-1:0] cpf;         // filled by the prefetch, not yet hit
+
+    wire  [19:3]          cpu_line = a[19:3];
+    wire  [IDXW-1:0]      cidx     = cpu_line[TAGLO-1:3];
+    logic [TAGW+63:0]     cq;
+    line_t                cq_line;     // the line cq was read for
+    logic                 cq_ok, cq_v, cq_p;
+
+    // a fill: by a miss (demand) or the prefetch, written as it lands
+    logic                 c_we;
+    logic [IDXW-1:0]      c_widx;
+    logic [TAGW+63:0]     c_wdata;
+    logic                 c_wpf;
+
+    // the prefetch: a line it wants, then its tag read, then the fill
+    logic                 pf_want, pf_busy, pq_ok, pq_v;
+    line_t                pf_line;
+    logic [TAGW-1:0]      pq;
+    logic                 req_d;       // rom_req a clock ago: a request's edge needs a low clock
+    line_t                pf_wline;    // the line in flight
+
+    always_ff @(posedge clk) begin
+        if (c_we) begin
+            cmem[c_widx]  <= c_wdata;
+            ptags[c_widx] <= c_wdata[TAGW+63:64];
+        end
+        cq      <= cmem[cidx];
+        cq_line <= cpu_line;
+        cq_v    <= cvalid[cidx];
+        cq_p    <= cpf[cidx];
+        cq_ok   <= !c_we && !cinval;
+        pq      <= ptags[pf_line[TAGLO-1:3]];
+        pq_v    <= cvalid[pf_line[TAGLO-1:3]];
+        pq_ok   <= !c_we && !cinval;
+    end
+
+    wire [1:0]    lane       = a[2:1];
+    wire          cq_here    = cq_ok && (cq_line == cpu_line);
+    wire          line_hit   = cq_here && cq_v && (cq[TAGW+63:64] == cpu_line[19:TAGLO]);
+    wire          line_miss  = cq_here && !line_hit;
+    wire [15:0]   line_word  = cq[{1'b0, lane, 4'd0} +: 16];
+    wire [15:0]   burst_word = rom_dout[{lane, 4'd0} +: 16];
+    wire [SDR_AW:1] line_wa  = SDR_AW'({cpu_line, 2'b00});
+
+    // the line after `l`, if there is one in ROM
+    function automatic logic [17:0] next_line(input line_t l);
+        return {1'b0, l} + 18'd1;
+    endfunction
+    wire [17:0]   cpu_next   = next_line(cpu_line);
+
+    // the prefetch's tag read: pq holds pf_line's when pq_line says so
+    line_t        pq_line;
+    always_ff @(posedge clk) pq_line <= pf_line;
+    wire          pq_here    = pq_ok && (pq_line == pf_line);
+    wire          pf_there   = pq_here && pq_v && (pq == pf_line[19:TAGLO]);
 
     // ---------------------------------------------------------- the FSM
     typedef enum logic [2:0] { S_IDLE, S_ROM, S_RAM, S_MCU, S_PALRD, S_DONE } state_t;
     state_t state;
     assign idle = (state == S_IDLE) && !rom_req && !ram_req;
+
+    // A miss goes out once the line's q is sure, the port is free and the
+    // last request has been low a clock.
+    wire port_free = !rom_req && !req_d && !pf_busy;
+    wire dem_go    = (state == S_IDLE) && as && ds && sel_rom && line_miss && port_free;
+    // The prefetch may go out alongside anything but a ROM read or a TOYBOX
+    // command, which want the port themselves.
+    wire pf_go     = pf_want && pq_here && !pf_there && port_free && !pf_stop && !mcu_busy
+                   && (state == S_DONE || state == S_RAM || state == S_PALRD
+                       || (state == S_IDLE && !(as && ds && (sel_rom || (wr && sel_com)))));
     logic [15:0] hold_word;     // ROM or SRAM data, held for the rest of the cycle
     logic [1:0]  mcu_wait;
 
@@ -205,28 +286,54 @@ module kaneko_gtmr_bus #(
         mcu_com_we <= 1'b0; hit_we <= 1'b0;
         unmapped_hit <= 1'b0;
 
+        req_d <= rom_req;
+        c_we  <= 1'b0;
+
         if (rst) begin
             state       <= S_IDLE;
             DTACKn      <= 1'b1;
             rom_req     <= 1'b0;
             ram_req     <= 1'b0;
             cvalid      <= '0;
+            cpf         <= '0;
+            pf_want     <= 1'b0;
+            pf_busy     <= 1'b0;
             disp_enable <= 16'h0001;   // MAME: enabled until a game says otherwise
         end else begin
+            // the prefetch: drop a line already there, else fetch it (before
+            // the FSM, so a line it asks for this clock wins over the drop)
+            if (pf_want && pf_there) pf_want <= 1'b0;
+            if (pf_go) begin
+                rom_addr <= SDR_AW'({pf_line, 2'b00});
+                rom_req  <= 1'b1;
+                pf_busy  <= 1'b1;
+                pf_wline <= pf_line;
+                pf_want  <= 1'b0;
+            end
+
             case (state)
                 S_IDLE: begin
                     DTACKn <= 1'b1;
                     if (as && ds) begin
                         if (sel_rom) begin
+                            // a hit answers at once; a miss waits for the
+                            // port; an unsure q is read again next clock
                             if (line_hit) begin
                                 hold_word <= {line_word[7:0], line_word[15:8]};
                                 DTACKn    <= 1'b0;
                                 state     <= S_DONE;
-                            end else begin
-                                rom_addr <= {rom_wa[SDR_AW:3], 2'b00};
+                                if (cq_p) begin
+                                    cpf[cidx] <= 1'b0;
+                                    if (!cpu_next[17]) begin pf_want <= 1'b1; pf_line <= cpu_next[16:0]; end
+                                end
+                            end else if (dem_go) begin
+                                rom_addr <= line_wa;
                                 rom_req  <= 1'b1;
                                 state    <= S_ROM;
                             end
+                        end else if (wr && sel_com && (pf_busy || rom_req)) begin
+                            // a TOYBOX command takes the ROM port: let the
+                            // prefetch land first
                         end else if (sel_ext) begin
                             ram_req  <= 1'b1;
                             ram_we   <= wr;
@@ -280,13 +387,15 @@ module kaneko_gtmr_bus #(
                 end
 
                 S_ROM: if (rom_ack) begin
-                    rom_req      <= 1'b0;
-                    cdata[cidx]  <= rom_dout;
-                    ctag[cidx]   <= rom_wa[SDR_AW:TAGLO];
-                    cvalid[cidx] <= 1'b1;
-                    hold_word    <= {burst_word[7:0], burst_word[15:8]};
-                    DTACKn       <= 1'b0;
-                    state        <= S_DONE;
+                    rom_req   <= 1'b0;
+                    c_we      <= 1'b1;
+                    c_widx    <= cidx;
+                    c_wdata   <= {cpu_line[19:TAGLO], rom_dout};
+                    c_wpf     <= 1'b0;
+                    hold_word <= {burst_word[7:0], burst_word[15:8]};
+                    DTACKn    <= 1'b0;
+                    state     <= S_DONE;
+                    if (!cpu_next[17]) begin pf_want <= 1'b1; pf_line <= cpu_next[16:0]; end
                 end
 
                 S_RAM: if (ram_ack) begin
@@ -324,7 +433,21 @@ module kaneko_gtmr_bus #(
 
                 default: state <= S_IDLE;
             endcase
-            if (cinval) cvalid <= '0;
+
+            if (pf_busy && rom_ack) begin
+                rom_req  <= 1'b0;
+                pf_busy  <= 1'b0;
+                c_we     <= 1'b1;
+                c_widx   <= pf_wline[TAGLO-1:3];
+                c_wdata  <= {pf_wline[19:TAGLO], rom_dout};
+                c_wpf    <= 1'b1;
+            end
+            // a fill lands with its RAM write
+            if (c_we) begin
+                cvalid[c_widx] <= 1'b1;
+                cpf[c_widx]    <= c_wpf;
+            end
+            if (cinval) begin cvalid <= '0; cpf <= '0; pf_want <= 1'b0; end
             if (de_we)  disp_enable <= de_d;
         end
     end

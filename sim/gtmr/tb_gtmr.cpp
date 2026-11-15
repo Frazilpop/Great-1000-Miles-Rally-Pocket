@@ -28,8 +28,9 @@
 // Writes frame_NNNNN.ppm for each requested frame and one line per frame to
 // stats.csv: frame, sprite draw clocks (/64), overruns so far, cycles, 68000
 // bus cycles and AS clocks in the frame, the KC-002's capture and shown tags,
-// the longest bus cycle (clocks AS to DTACK) and its byte address, and the
-// clocks spent waiting beyond a no-wait cycle.
+// the longest bus cycle (clocks AS to DTACK) and its byte address, the
+// clocks spent waiting beyond a no-wait cycle, the draw's split, and the
+// clocks the 68000 sat in the program's idle loop (its spare time).
 //
 // --inputs takes tools/mame_gtmr_io_profile.lua's plan file ("<frame>
 // coin=1 b2=1 right=0 ..."), so a race can be played the same way in MAME
@@ -373,7 +374,7 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks,draw_busy,w_psram,w_starved,f_rom\n");
+    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks,draw_busy,w_psram,w_starved,f_rom,idle\n");
     // The draw's clocks this frame: busy at all, the writer waiting on a
     // PSRAM row, the writer idle with nothing to write, the fetcher waiting
     // on the sprite ROM.
@@ -477,6 +478,14 @@ int main(int argc, char** argv) {
     long traced = 0;
     bool dtack_prev = false;
     uint64_t bus_cycles = 0, as_clocks = 0, bus_cycles_f = 0, as_clocks_f = 0;
+    // The game's spare time: its main program, once running, is one
+    // `bra.b *` (each set's address below) and everything else happens in
+    // the interrupts. `idle` is the clocks from a fetch there to the next
+    // bus cycle anywhere else, so a frame's idle is the 68000's spare time.
+    static const uint32_t idle_pc[5] = { 0x000ae4, 0x000ae4, 0x000b0a, 0x000d10, 0x000d34 };
+    const uint32_t ipc = idle_pc[(game >= 0 && game < 5) ? game : 0];
+    uint64_t idle = 0, idle_t0 = 0;
+    bool idling = false;
     bool as_prev = false;
 
     // ------------------------------------------------------- save states
@@ -918,6 +927,9 @@ int main(int argc, char** argv) {
                 // The 68000 latches read data after DTACK, so the next number
                 // goes in when this cycle ends, not now.
                 if (!rnds.empty() && a == 0x900014 && rd) rnd_next = true;
+                if (rd && (a == ipc || a == ipc + 2)) {
+                    if (!idling) { idling = true; idle_t0 = cyc; }
+                } else if (idling) { idling = false; idle += cyc - idle_t0; }
                 if (trace && !(trace_data_only && rd && a < 0x0ffffe)) {
                     uint32_t ds = R.kaneko_gtmr__DOT__dbg_ds;
                     uint32_t d  = rd ? R.kaneko_gtmr__DOT__dbg_din : R.kaneko_gtmr__DOT__dbg_dout;
@@ -962,7 +974,7 @@ int main(int argc, char** argv) {
                     fwrite(sprimg.data(), 2, sprimg.size(), f);
                     fclose(f);
                 }
-                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n", frame,
+                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n", frame,
                         (unsigned)R.kaneko_gtmr__DOT__spr_draw_clocks,
                         (unsigned)R.kaneko_gtmr__DOT__spr_overruns,
                         (unsigned long long)cyc,
@@ -975,8 +987,10 @@ int main(int argc, char** argv) {
                         (unsigned long long)late_lines, (unsigned long long)max_line,
                         (unsigned long long)late_spr, (unsigned long long)max_spr,
                         (unsigned long long)d_busy, (unsigned long long)d_wps,
-                        (unsigned long long)d_wst, (unsigned long long)d_rom);
+                        (unsigned long long)d_wst, (unsigned long long)d_rom,
+                        (unsigned long long)(idle + (idling ? cyc - idle_t0 : 0)));
                 d_busy = d_wps = d_wst = d_rom = 0;
+                idle = 0; if (idling) idle_t0 = cyc;
                 late_lines = 0; max_line = 0; late_spr = 0; max_spr = 0;
                 bus_cycles_f = bus_cycles; as_clocks_f = as_clocks;
                 max_wait = 0; max_wait_addr = 0; hold_clocks = 0;
@@ -1020,6 +1034,8 @@ int main(int argc, char** argv) {
 
     fclose(stats);
     if (fbm) fprintf(stderr, "PSRAM protocol violations: %u\n", (unsigned)fbm->violations);
+    fprintf(stderr, "overlay: least spare time %u x 64 clocks, frames with none %u\n",
+            (unsigned)t->diag_idle_min, (unsigned)t->diag_lag_frames);
 #ifdef ANALOGIZER
     if (anz_keys) fclose(anz_keys);
     fprintf(stderr, "analogizer: word taken %08x; pins off the template's on %llu of %llu edges with it off; "

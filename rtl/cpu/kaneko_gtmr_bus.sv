@@ -36,7 +36,7 @@
 
 module kaneko_gtmr_bus #(
     parameter int unsigned SDR_AW    = 25,
-    parameter int unsigned ROM_LINES = 256
+    parameter int unsigned ROM_SETS  = 256
 )(
     input  wire        clk,
     input  wire        rst,
@@ -71,6 +71,7 @@ module kaneko_gtmr_bus #(
     output wire  [15:0] vmem_din,
     input  wire  [15:0] vram0_q, vram1_q, spr_q, pal_q,
     input  wire         spr_hold,      // sprite RAM is being snapshotted: writes wait
+    input  wire         spr_soon,      // the line before the snapshot starts
 
     // Register files
     output logic        v2r0_we, v2r1_we, sprreg_we,
@@ -183,72 +184,100 @@ module kaneko_gtmr_bus #(
     // The arcade's 68000 reads its ROM with no wait. Here a line not in the
     // cache costs an SDRAM burst, and in a race the program and its tables
     // stream through: with sixteen lines one read in five missed (MAME's
-    // fetches, gtmrusa's race), enough to lose a fifth of a frame. So: 256
-    // direct-mapped 64-bit lines in block RAM, and a tagged next-line
+    // fetches, gtmrusa's race), enough to lose a fifth of a frame. So: 512
+    // 64-bit lines in block RAM, two ways of 256 sets, and a tagged next-line
     // prefetch. A line filled by a miss asks for the line after it; so does
     // the first hit on a line the prefetch filled, so a run of code or a table
     // read in order stays a line ahead. The prefetch runs while the 68000
     // goes on with hits and every other device; only a miss, or a TOYBOX
     // command (which takes the ROM port), waits for it to land.
     //
-    // ROM is 000000-0fffff, so a line is word address [19:3] of it: an index
-    // and a tag. Each line's tag and data are one word of `cmem`, read on
-    // the 68000's address every clock: the address is out a clock or more
-    // before AS, so on the clock the FSM sees the cycle, cq already holds its
-    // line. A second copy of the tags (`ptags`) is read by the prefetch, to
-    // leave a line already there alone. A clock that writes either RAM makes
-    // its next q unsure (`cq_ok`, `pq_ok`): it is read again.
-    localparam int unsigned IDXW  = $clog2(ROM_LINES);
+    // Two ways because one wasn't enough: on gtmrusa's heaviest frames a loop
+    // at 0x0c000 and the table it reads at 0x0e000 fall on the same sets, and
+    // with the lines direct-mapped they put each other out, a miss in every
+    // dozen reads (1,300 a frame). Each set keeps the way used last; a fill
+    // takes an empty way, else the other one.
+    //
+    // ROM is 000000-0fffff, so a line is word address [19:3] of it: a set
+    // and a tag. Each way's tag and data are one word of its `cmem`, both read
+    // on the 68000's address every clock: the address is out a clock or more
+    // before AS, so on the clock the FSM sees the cycle, cq0/cq1 already hold
+    // the set. A second copy of the tags (`ptags`) is read by the prefetch, to
+    // leave a line already there alone. A clock that writes a RAM makes the
+    // next q unsure (`cq_ok`, `pq_ok`): it is read again.
+    localparam int unsigned IDXW  = $clog2(ROM_SETS);
     localparam int unsigned TAGLO = 3 + IDXW;
     localparam int unsigned TAGW  = 20 - TAGLO;
     typedef logic [19:3] line_t;
 
-    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW+63:0] cmem  [0:ROM_LINES-1];
-    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW-1:0]  ptags [0:ROM_LINES-1];
-    logic [ROM_LINES-1:0] cvalid;      // the line holds what its tag says
-    logic [ROM_LINES-1:0] cpf;         // filled by the prefetch, not yet hit
+    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW+63:0] cmem0  [0:ROM_SETS-1];
+    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW+63:0] cmem1  [0:ROM_SETS-1];
+    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW-1:0]  ptags0 [0:ROM_SETS-1];
+    (* ramstyle = "M10K, no_rw_check" *) logic [TAGW-1:0]  ptags1 [0:ROM_SETS-1];
+    logic [ROM_SETS-1:0]  cvalid0, cvalid1;  // the way holds what its tag says
+    logic [ROM_SETS-1:0]  cpf0, cpf1;        // filled by the prefetch, not yet hit
+    logic [ROM_SETS-1:0]  lru;               // the way a fill takes if both are full
 
     wire  [19:3]          cpu_line = a[19:3];
     wire  [IDXW-1:0]      cidx     = cpu_line[TAGLO-1:3];
-    logic [TAGW+63:0]     cq;
-    line_t                cq_line;     // the line cq was read for
-    logic                 cq_ok, cq_v, cq_p;
+    logic [TAGW+63:0]     cq0, cq1;
+    line_t                cq_line;     // the line cq0/cq1 were read for
+    logic                 cq_ok, cq_v0, cq_v1, cq_p0, cq_p1, cq_lru;
 
     // a fill: by a miss (demand) or the prefetch, written as it lands
-    logic                 c_we;
+    logic                 c_we, c_wway;
     logic [IDXW-1:0]      c_widx;
     logic [TAGW+63:0]     c_wdata;
     logic                 c_wpf;
 
     // the prefetch: a line it wants, then its tag read, then the fill
-    logic                 pf_want, pf_busy, pq_ok, pq_v;
+    logic                 pf_want, pf_busy, pq_ok, pq_v0, pq_v1, pq_lru;
     line_t                pf_line;
-    logic [TAGW-1:0]      pq;
+    logic [TAGW-1:0]      pq0, pq1;
     logic                 req_d;       // rom_req a clock ago: a request's edge needs a low clock
     line_t                pf_wline;    // the line in flight
+    logic                 pf_wway, dem_way;
+    wire  [IDXW-1:0]      pidx     = pf_line[TAGLO-1:3];
 
     always_ff @(posedge clk) begin
-        if (c_we) begin
-            cmem[c_widx]  <= c_wdata;
-            ptags[c_widx] <= c_wdata[TAGW+63:64];
+        if (c_we && !c_wway) begin
+            cmem0[c_widx]  <= c_wdata;
+            ptags0[c_widx] <= c_wdata[TAGW+63:64];
         end
-        cq      <= cmem[cidx];
+        if (c_we && c_wway) begin
+            cmem1[c_widx]  <= c_wdata;
+            ptags1[c_widx] <= c_wdata[TAGW+63:64];
+        end
+        cq0     <= cmem0[cidx];
+        cq1     <= cmem1[cidx];
         cq_line <= cpu_line;
-        cq_v    <= cvalid[cidx];
-        cq_p    <= cpf[cidx];
+        cq_v0   <= cvalid0[cidx];
+        cq_v1   <= cvalid1[cidx];
+        cq_p0   <= cpf0[cidx];
+        cq_p1   <= cpf1[cidx];
+        cq_lru  <= lru[cidx];
         cq_ok   <= !c_we && !cinval;
-        pq      <= ptags[pf_line[TAGLO-1:3]];
-        pq_v    <= cvalid[pf_line[TAGLO-1:3]];
+        pq0     <= ptags0[pidx];
+        pq1     <= ptags1[pidx];
+        pq_v0   <= cvalid0[pidx];
+        pq_v1   <= cvalid1[pidx];
+        pq_lru  <= lru[pidx];
         pq_ok   <= !c_we && !cinval;
     end
 
     wire [1:0]    lane       = a[2:1];
     wire          cq_here    = cq_ok && (cq_line == cpu_line);
-    wire          line_hit   = cq_here && cq_v && (cq[TAGW+63:64] == cpu_line[19:TAGLO]);
-    wire          line_miss  = cq_here && !line_hit;
-    wire [15:0]   line_word  = cq[{1'b0, lane, 4'd0} +: 16];
+    wire          hit0       = cq_v0 && (cq0[TAGW+63:64] == cpu_line[19:TAGLO]);
+    wire          hit1       = cq_v1 && (cq1[TAGW+63:64] == cpu_line[19:TAGLO]);
+    wire          line_hit   = cq_here && (hit0 || hit1);
+    wire          line_miss  = cq_here && !(hit0 || hit1);
+    wire [63:0]   hit_data   = hit0 ? cq0[63:0] : cq1[63:0];
+    wire          hit_pf     = hit0 ? cq_p0 : cq_p1;
+    wire [15:0]   line_word  = hit_data[{lane, 4'd0} +: 16];
     wire [15:0]   burst_word = rom_dout[{lane, 4'd0} +: 16];
     wire [SDR_AW:1] line_wa  = SDR_AW'({cpu_line, 2'b00});
+    // the way a miss fills: an empty one, else the one not used last
+    wire          dem_vict   = !cq_v0 ? 1'b0 : !cq_v1 ? 1'b1 : cq_lru;
 
     // the line after `l`, if there is one in ROM
     function automatic logic [17:0] next_line(input line_t l);
@@ -256,14 +285,16 @@ module kaneko_gtmr_bus #(
     endfunction
     wire [17:0]   cpu_next   = next_line(cpu_line);
 
-    // the prefetch's tag read: pq holds pf_line's when pq_line says so
+    // the prefetch's tag read: pq0/pq1 hold pf_line's set when pq_line says so
     line_t        pq_line;
     always_ff @(posedge clk) pq_line <= pf_line;
     wire          pq_here    = pq_ok && (pq_line == pf_line);
-    wire          pf_there   = pq_here && pq_v && (pq == pf_line[19:TAGLO]);
+    wire          pf_there   = pq_here && ((pq_v0 && (pq0 == pf_line[19:TAGLO]))
+                                        || (pq_v1 && (pq1 == pf_line[19:TAGLO])));
+    wire          pf_vict    = !pq_v0 ? 1'b0 : !pq_v1 ? 1'b1 : pq_lru;
 
     // ---------------------------------------------------------- the FSM
-    typedef enum logic [2:0] { S_IDLE, S_ROM, S_RAM, S_MCU, S_PALRD, S_DONE } state_t;
+    typedef enum logic [2:0] { S_IDLE, S_ROM, S_RAM, S_MCU, S_PALRD, S_WDS, S_DONE } state_t;
     state_t state;
     assign idle = (state == S_IDLE) && !rom_req && !ram_req;
 
@@ -272,10 +303,29 @@ module kaneko_gtmr_bus #(
     wire port_free = !rom_req && !req_d && !pf_busy;
     wire dem_go    = (state == S_IDLE) && as && ds && sel_rom && line_miss && port_free;
     // The prefetch may go out alongside anything but a ROM read or a TOYBOX
-    // command, which want the port themselves.
-    wire pf_go     = pf_want && pq_here && !pf_there && port_free && !pf_stop && !mcu_busy
+    // command, which want the port themselves; nor in the clock that empties
+    // the cache, the let-go, where pf_stop has just fallen and a want left by
+    // the load's own run of the 68000 is not yet dropped: it went out in one
+    // run of a save state and not the other, and the first miss after the
+    // let-go waited 9 clocks for it (16 Nov).
+    wire pf_go     = pf_want && pq_here && !pf_there && port_free && !pf_stop && !mcu_busy && !cinval
                    && (state == S_DONE || state == S_RAM || state == S_PALRD
                        || (state == S_IDLE && !(as && ds && (sel_rom || (wr && sel_com)))));
+    // A WRITE IS ANSWERED ON AS. The 68000 drives a write's data strobes a
+    // clock after AS and samples DTACK in S4; answered on AS and DS, every
+    // write took a wait state the arcade's on-chip memories don't (a cycle of
+    // 15 clocks, not 12: some 4,500 writes a frame in a race, work RAM and
+    // sprite RAM mostly). So a write to anything that takes it at once gets
+    // DTACK on AS and is done when the strobes come (S_WDS). Not the SRAM, a
+    // TOYBOX command or ROM, which have waits of their own, nor sprite RAM
+    // from the line before its snapshot, so a write can't fall into the copy.
+    wire wr_fast = !sel_rom && !sel_ext && !sel_com && !(sel_spr && (spr_hold || spr_soon));
+    // the strobes of a write that needs nothing else: from S_IDLE (a write
+    // that went the slow way) or S_WDS
+    wire wr_now  = as && ds && wr
+                 && ((state == S_WDS)
+                     || (state == S_IDLE && !sel_rom && !sel_ext && !sel_com
+                         && !(sel_spr && spr_hold)));
     logic [15:0] hold_word;     // ROM or SRAM data, held for the rest of the cycle
     logic [1:0]  mcu_wait;
 
@@ -289,13 +339,36 @@ module kaneko_gtmr_bus #(
         req_d <= rom_req;
         c_we  <= 1'b0;
 
+        if (wr_now) begin
+            vram0_we   <= sel_v2w0;
+            vram1_we   <= sel_v2w1;
+            spr_we     <= sel_spr;
+            pal_we     <= sel_pal;
+            v2r0_we    <= sel_v2r0;
+            v2r1_we    <= sel_v2r1;
+            sprreg_we  <= sel_sprr;
+            oki0_we    <= sel_oki0 && ~LDSn;
+            oki1_we    <= sel_oki1 && ~LDSn;
+            okib0_we   <= sel_okb0 && ~LDSn;
+            okib1_we   <= sel_okb1 && ~LDSn;
+            hit_we     <= sel_hit;
+            if (sel_disp) begin
+                if (~UDSn) disp_enable[15:8] <= oEdb[15:8];
+                if (~LDSn) disp_enable[7:0]  <= oEdb[7:0];
+            end
+            if (!decoded) unmapped_hit <= 1'b1;
+        end
+
         if (rst) begin
             state       <= S_IDLE;
             DTACKn      <= 1'b1;
             rom_req     <= 1'b0;
             ram_req     <= 1'b0;
-            cvalid      <= '0;
-            cpf         <= '0;
+            cvalid0     <= '0;
+            cvalid1     <= '0;
+            cpf0        <= '0;
+            cpf1        <= '0;
+            lru         <= '0;
             pf_want     <= 1'b0;
             pf_busy     <= 1'b0;
             disp_enable <= 16'h0001;   // MAME: enabled until a game says otherwise
@@ -308,13 +381,17 @@ module kaneko_gtmr_bus #(
                 rom_req  <= 1'b1;
                 pf_busy  <= 1'b1;
                 pf_wline <= pf_line;
+                pf_wway  <= pf_vict;
                 pf_want  <= 1'b0;
             end
 
             case (state)
                 S_IDLE: begin
                     DTACKn <= 1'b1;
-                    if (as && ds) begin
+                    if (as && wr && !ds && wr_fast) begin
+                        DTACKn <= 1'b0;
+                        state  <= S_WDS;
+                    end else if (as && ds) begin
                         if (sel_rom) begin
                             // a hit answers at once; a miss waits for the
                             // port; an unsure q is read again next clock
@@ -322,13 +399,16 @@ module kaneko_gtmr_bus #(
                                 hold_word <= {line_word[7:0], line_word[15:8]};
                                 DTACKn    <= 1'b0;
                                 state     <= S_DONE;
-                                if (cq_p) begin
-                                    cpf[cidx] <= 1'b0;
+                                lru[cidx] <= hit0;     // the other way next
+                                if (hit_pf) begin
+                                    if (hit0) cpf0[cidx] <= 1'b0;
+                                    else      cpf1[cidx] <= 1'b0;
                                     if (!cpu_next[17]) begin pf_want <= 1'b1; pf_line <= cpu_next[16:0]; end
                                 end
                             end else if (dem_go) begin
                                 rom_addr <= line_wa;
                                 rom_req  <= 1'b1;
+                                dem_way  <= dem_vict;
                                 state    <= S_ROM;
                             end
                         end else if (wr && sel_com && (pf_busy || rom_req)) begin
@@ -351,26 +431,9 @@ module kaneko_gtmr_bus #(
                             // Wait for the snapshot to finish; the cycle is
                             // re-evaluated next clock.
                         end else begin
-                            if (wr) begin
-                                vram0_we   <= sel_v2w0;
-                                vram1_we   <= sel_v2w1;
-                                spr_we     <= sel_spr;
-                                pal_we     <= sel_pal;
-                                v2r0_we    <= sel_v2r0;
-                                v2r1_we    <= sel_v2r1;
-                                sprreg_we  <= sel_sprr;
-                                oki0_we    <= sel_oki0 && ~LDSn;
-                                oki1_we    <= sel_oki1 && ~LDSn;
-                                okib0_we   <= sel_okb0 && ~LDSn;
-                                okib1_we   <= sel_okb1 && ~LDSn;
-                                mcu_com_we <= sel_com;
-                                hit_we     <= sel_hit;
-                                if (sel_disp) begin
-                                    if (~UDSn) disp_enable[15:8] <= oEdb[15:8];
-                                    if (~LDSn) disp_enable[7:0]  <= oEdb[7:0];
-                                end
-                            end
-                            if (!decoded) unmapped_hit <= 1'b1;
+                            // (a write's strobes are wr_now's, above)
+                            if (wr) mcu_com_we <= sel_com;
+                            if (!wr && !decoded) unmapped_hit <= 1'b1;
                             if (wr && sel_com) begin
                                 // Only the write that completes the 0xffff
                                 // quartet starts a command, but holding every
@@ -390,12 +453,22 @@ module kaneko_gtmr_bus #(
                     rom_req   <= 1'b0;
                     c_we      <= 1'b1;
                     c_widx    <= cidx;
+                    c_wway    <= dem_way;
                     c_wdata   <= {cpu_line[19:TAGLO], rom_dout};
                     c_wpf     <= 1'b0;
                     hold_word <= {burst_word[7:0], burst_word[15:8]};
                     DTACKn    <= 1'b0;
                     state     <= S_DONE;
                     if (!cpu_next[17]) begin pf_want <= 1'b1; pf_line <= cpu_next[16:0]; end
+                end
+
+                // a write answered on AS: its strobes (wr_now) end it
+                S_WDS: begin
+                    DTACKn <= 1'b0;
+                    if (!as) begin
+                        DTACKn <= 1'b1;
+                        state  <= S_IDLE;
+                    end else if (ds) state <= S_DONE;
                 end
 
                 S_RAM: if (ram_ack) begin
@@ -439,15 +512,21 @@ module kaneko_gtmr_bus #(
                 pf_busy  <= 1'b0;
                 c_we     <= 1'b1;
                 c_widx   <= pf_wline[TAGLO-1:3];
+                c_wway   <= pf_wway;
                 c_wdata  <= {pf_wline[19:TAGLO], rom_dout};
                 c_wpf    <= 1'b1;
             end
             // a fill lands with its RAM write
             if (c_we) begin
-                cvalid[c_widx] <= 1'b1;
-                cpf[c_widx]    <= c_wpf;
+                if (c_wway) begin cvalid1[c_widx] <= 1'b1; cpf1[c_widx] <= c_wpf; end
+                else        begin cvalid0[c_widx] <= 1'b1; cpf0[c_widx] <= c_wpf; end
+                lru[c_widx] <= !c_wway;
             end
-            if (cinval) begin cvalid <= '0; cpf <= '0; pf_want <= 1'b0; end
+            // (lru too: a save state's two runs must choose the same ways)
+            if (cinval) begin
+                cvalid0 <= '0; cvalid1 <= '0; cpf0 <= '0; cpf1 <= '0; lru <= '0;
+                pf_want <= 1'b0;
+            end
             if (de_we)  disp_enable <= de_d;
         end
     end

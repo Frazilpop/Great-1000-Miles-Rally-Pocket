@@ -36,10 +36,13 @@ foreach {name c} [list core $clk_core sdram $clk_sdram sdram_ps $clk_sdram_ps \
 # read data into the tile ROM's line registers, -0.097 ns at the fast 0 C
 # corner with 50 ps asked for). 150 ps more hold uncertainty while fitting
 # asks for a margin the analyser then sees; the analyser's own figures are
-# left as they are.
+# left as they are. The same for 48 -> 6, pocket_video's pixel hand-over (16
+# Nov: hold_rgb[12] into s_rgb[12], -0.017 ns at the fast 0 C corner, 0.71 ns
+# of data against 0.66 of skew between the two counters).
 if {$::quartus(nameofexecutable) == "quartus_fit"} {
     set_clock_uncertainty -hold -add -from $clk_core  -to $clk_sdram 0.150
     set_clock_uncertainty -hold -add -from $clk_sdram -to $clk_core  0.150
+    set_clock_uncertainty -hold -add -from $clk_core  -to $clk_vid   0.150
 }
 
 # The SDRAM clock as the device sees it: clk_sdram_ps, forwarded through the

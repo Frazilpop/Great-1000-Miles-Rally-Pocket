@@ -409,6 +409,7 @@ kaneko_gtmr_bus #(.SDR_AW(SDR_AW)) u_bus
     .vmem_addr(vmem_addr), .vmem_din(vmem_din),
     .vram0_q(q_vram0), .vram1_q(q_vram1), .spr_q(q_spr), .pal_q(q_pal),
     .spr_hold(spr_hold),
+    .spr_soon(vcnt == 10'd223),   // kaneko_kc002's LINE_CAPTURE - 1
 
     .v2r0_we(v2r0_we), .v2r1_we(v2r1_we), .sprreg_we(sprreg_we),
     .reg_addr(reg_addr), .reg_din(reg_din),
@@ -463,8 +464,16 @@ assign ram_addr = mcu_busy ? {2'b00, mcu_ram_addr} : bus_ram_addr;
 assign ram_din  = mcu_busy ? mcu_ram_din  : bus_ram_din;
 assign ram_be   = mcu_busy ? mcu_ram_be   : bus_ram_be;
 
-wire              p4_req  = mcu_busy ? mcu_rom_req  : bus_rom_req;
-wire [SDR_AW:1]   p4_addr = mcu_busy ? mcu_rom_addr : bus_rom_addr;
+// The ROM port changes hands a clock after `mcu_busy`, which is combinational
+// on the 68000's write data (the fourth 0xFFFF starts a command): taken
+// straight, that data reached kaneko_sdram's 96 MHz arbiter in one clock
+// (16 Nov, -0.216 ns). Neither side asks in that clock: the bus held the
+// command's write until its prefetch had landed and starts none in S_MCU, and
+// the MCU's request is a register that rises no sooner than the clock after.
+logic             p4_mcu;
+always_ff @(posedge clk) p4_mcu <= mcu_busy;
+wire              p4_req  = p4_mcu ? mcu_rom_req  : bus_rom_req;
+wire [SDR_AW:1]   p4_addr = p4_mcu ? mcu_rom_addr : bus_rom_addr;
 
 // ---------------------------------------------------------------- EEPROM
 // 64 x 16. The platform writes the save file before the 68000 leaves reset

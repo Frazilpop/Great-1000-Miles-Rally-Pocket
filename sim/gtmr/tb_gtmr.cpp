@@ -393,10 +393,13 @@ int main(int argc, char** argv) {
     uint64_t late_spr = 0, max_spr = 0, spr_t0 = 0;
     bool spr_run_prev = false;
     // --sdram-serial N: the Pocket's one SDRAM, roughly. One access at a time,
-    // N clocks each, the lowest-numbered waiting port first (kaneko_sdram's
-    // urgent ports 0-6 come before the sprite ports 7-8), and a refresh of
-    // 6 clocks every 350 (T_REFI 700 / T_RC 11 at 96 MHz).
-    int srv_port = -1, srv_cnt = 0, refi = 350;
+    // N clocks each, chosen as kaneko_sdram chooses: its urgent ports 0-6
+    // before the sprite ports 7-8, round-robin within each from the port after
+    // the last one served (it served the lowest-numbered port first until
+    // 16 Nov, which left the 68000's port 4 behind the four tile ports every
+    // time: waits of ~780 clocks, where the card has never shown over 56);
+    // and a refresh of 6 clocks every 350 (T_REFI 700 / T_RC 11 at 96 MHz).
+    int srv_port = -1, srv_cnt = 0, refi = 350, rr_next = 0;
 
     auto& R = *t->rootp;
     R.kaneko_gtmr__DOT__dbg_spr_off = no_sprites;
@@ -555,8 +558,9 @@ int main(int argc, char** argv) {
         letgo_cyc = cyc;
         // --sdram-serial's refresh count is the harness's, in no state: both
         // runs restart it here, so it can't tell them apart (a different
-        // phase moved gtmre's slideshow by a few clocks for three frames).
-        refi = 350;
+        // phase moved gtmre's slideshow by a few clocks for three frames),
+        // and its round-robin turn with it.
+        refi = 350; rr_next = 0;
         std::string ap = outdir + "/after.txt";
         after = fopen(ap.c_str(), "w");
         after_k = 0; snd_crc = 0;
@@ -821,8 +825,13 @@ int main(int argc, char** argv) {
                     rp[p].addr = (uint32_t)getbits(t->rom_addr, p * SDR_AW, SDR_AW);
                 }
             if (srv_port < 0)
-                for (int p = 0; p < NP; p++)
-                    if (rp[p].busy) { srv_port = p; srv_cnt = sdr_serial; break; }
+                for (int tier = 0; tier < 2 && srv_port < 0; tier++)
+                    for (int k = 0; k < NP; k++) {
+                        int p = (rr_next + k) % NP;
+                        if (rp[p].busy && ((p <= 6) == (tier == 0))) {
+                            srv_port = p; srv_cnt = sdr_serial; rr_next = (p + 1) % NP; break;
+                        }
+                    }
             if (srv_port >= 0 && --srv_cnt <= 0) {
                 if (srv_port < NP) {
                     Port& P = rp[srv_port];
@@ -956,9 +965,11 @@ int main(int argc, char** argv) {
             iack_prev = ia; vcnt_prev = vc; as_prev2 = as2;
         }
         // ---- bus monitor: random replay and trace, at the clock DTACK is
-        // first asserted for a bus cycle
+        // first asserted for a bus cycle, or for a write the clock after that
+        // its strobes are up (the board answers a write on AS, before them)
         {
-            bool dt = R.kaneko_gtmr__DOT__dbg_dtack && R.kaneko_gtmr__DOT__dbg_as;
+            bool dt = R.kaneko_gtmr__DOT__dbg_dtack && R.kaneko_gtmr__DOT__dbg_as
+                   && (R.kaneko_gtmr__DOT__dbg_rw || R.kaneko_gtmr__DOT__dbg_ds);
             if (dt && !dtack_prev) {
                 uint32_t a  = (uint32_t)R.kaneko_gtmr__DOT__dbg_eab << 1;
                 bool     rd = R.kaneko_gtmr__DOT__dbg_rw;

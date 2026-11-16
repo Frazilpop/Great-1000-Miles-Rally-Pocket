@@ -22,14 +22,20 @@
 -- scroll X and Y as last written (hex, 10.6), the speed, the distance's
 -- high word, and the shake's flag (0x103f1a) and parity (0x103f18).
 -- SHAKE_FRAMES ends the run after that many frames (none: runs on).
+-- SHAKE_RAND_OUT, if set, gets every read of the random port (0x900014) as a
+-- bus-trace line, which tb_gtmr's --rand-from replays: with them the core's
+-- run does the game's work frame for frame (the roadside dust is random,
+-- and without MAME's numbers the core's heaviest frames are not MAME's).
 
 local OUT    = os.getenv("SHAKE_OUT")
+local RAND   = os.getenv("SHAKE_RAND_OUT")
 local FRAMES = tonumber(os.getenv("SHAKE_FRAMES") or "0")
 
 local mach  = manager.machine
 local space = mach.devices[":maincpu"].spaces["program"]
 local fmt   = string.format
 local fh    = OUT and assert(io.open(OUT, "w"))
+local rh    = RAND and assert(io.open(RAND, "w"))
 
 local sx, sy = 0, 0
 _G.gtmr_shake_taps = {
@@ -37,6 +43,12 @@ _G.gtmr_shake_taps = {
     if o == 0x600004 then sx = d else sy = d end
   end),
 }
+if rh then
+  table.insert(_G.gtmr_shake_taps,
+    space:install_read_tap(0x900014, 0x900015, "shake_rand", function(o, d, m)
+      rh:write(fmt("900014 R %04x %04x\n", d, m))
+    end))
+end
 
 local function field(port, name)
   local p = mach.ioport.ports[port]
@@ -70,6 +82,7 @@ _G.gtmr_shake_frame = emu.add_machine_frame_notifier(function()
   if FRAMES > 0 and frames >= FRAMES then
     for _, t in ipairs(_G.gtmr_shake_taps) do t:remove() end
     if fh then fh:close() end
+    if rh then rh:close() end
     mach:exit()
   end
 end)

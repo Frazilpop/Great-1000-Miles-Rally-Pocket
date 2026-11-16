@@ -38,6 +38,8 @@
 // coin=1 b2=1 right=0 ..."), so a race can be played the same way in MAME
 // and here. The plan may also set hidelines=1/0 (Hide speed lines),
 // smooth=1/0 (Smooth top speed) and pause=1/0 (the board's pause input); MAME has no counterpart to either.
+// w<address>=<word> writes a work-RAM word at the frame's start, as a MAME
+// script's write_u16 does in its frame notifier (w103f40=4, w1035ec=0x30).
 //
 // Save states, through the board's state window (rtl/top/kaneko_state.sv), a
 // word every 20 clocks as the Pocket's bridge gives them:
@@ -438,7 +440,7 @@ int main(int argc, char** argv) {
                 char* eq = strchr(tok, '=');
                 if (!eq) continue;
                 *eq = 0;
-                plan.push_back({fr, tok, atoi(eq + 1)});
+                plan.push_back({fr, tok, (int)strtol(eq + 1, nullptr, 0)});
             }
         }
         fclose(f);
@@ -461,6 +463,16 @@ int main(int argc, char** argv) {
             else if (st.name == "pause") { t->pause = st.val ? 1 : 0; continue; }
             else if (st.name == "hidelines") { t->hide_speed_lines = st.val ? 1 : 0; continue; }
             else if (st.name == "smooth")    { t->smooth_top_speed = st.val ? 1 : 0; continue; }
+            else if (st.name.size() == 7 && st.name[0] == 'w') {
+                // w<address>=<word>: a work-RAM word written, as a MAME script's
+                // write_u16 (w103f40=4)
+                uint32_t wa = (uint32_t)strtoul(st.name.c_str() + 1, nullptr, 16);
+                if ((wa >> 16) == 0x10) {
+                    R.kaneko_gtmr__DOT__u_bus__DOT__wram_hi[(wa & 0xffff) >> 1] = (uint8_t)(st.val >> 8);
+                    R.kaneko_gtmr__DOT__u_bus__DOT__wram_lo[(wa & 0xffff) >> 1] = (uint8_t)st.val;
+                }
+                continue;
+            }
             if (bit >= 0) {
                 if (st.val) p1v |= (1u << bit); else p1v &= ~(1u << bit);
                 t->p1 = p1v;

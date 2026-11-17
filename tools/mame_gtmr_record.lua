@@ -21,8 +21,9 @@
 -- plan has the keys below only; any other key on the SYSTEM port (Coin 2,
 -- Service, 2 Players Start) reaches the game unrecorded, so each press of
 -- one is written to other_keys.txt to be put in the plan by hand.
--- MAME's own keys: 5 coin, 1 start, the arrows, Left Ctrl button 1, Left
--- Alt button 2.
+-- MAME's own keys: 5 coin, 1 start, the arrows, Left Ctrl button 1;
+-- button 2 (accelerate) is moved here from Left Alt to Z, for MAME and the
+-- recording alike, so the timing above holds for it too.
 --
 -- REC_DIR gets:
 --   plan.txt    tb_gtmr's --inputs: "<frame> b2=1", a line per change (the
@@ -87,6 +88,7 @@ for n, f in pairs(mach.ioport.ports[":SYSTEM"].fields) do
     OTHER[#OTHER + 1] = { n, f:input_seq("standard"), false }
   end
 end
+KEYS[8][2]:set_input_seq("standard", input:seq_from_tokens("KEYCODE_Z"))
 local seqs, held = {}, {}
 for i, k in ipairs(KEYS) do
   assert(k[2], "no field for " .. k[1])
@@ -94,6 +96,7 @@ for i, k in ipairs(KEYS) do
   held[i] = 0
   k[2]:set_value(0)
 end
+print("record: button 2 is " .. input:seq_name(seqs[8]))
 
 local IDLE = { gtmr = 0x0ae4, gtmre = 0x0ae4, gtmrusa = 0x0b0a,
                gtmr2 = 0x0d10, gtmr2u = 0x0d34 }

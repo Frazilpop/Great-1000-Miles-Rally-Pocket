@@ -11,7 +11,7 @@ These land in `third_party/`, pinned in `deps.lock`, and are never committed.
 |---|---|---|
 | [jtfpga/fx68k](https://github.com/jtfpga/fx68k) | GPL-3.0-only | The 68000 main CPU |
 | [jotego/jt6295](https://github.com/jotego/jt6295) | GPL-3.0-or-later | The two OKI M6295 sound chips |
-| [agg23/analogue-pocket-utils](https://github.com/agg23/analogue-pocket-utils) | MIT | Pocket shell IP: data loader, PSRAM, I2S audio, sync FIFO |
+| [agg23/analogue-pocket-utils](https://github.com/agg23/analogue-pocket-utils) | MIT | Pocket shell IP: data loader, I2S audio, sync FIFO |
 | [mamedev/mame](https://github.com/mamedev/mame) (`src/mame/kaneko/` only) | BSD-3-Clause (those files) | The reference, and the TOYBOX tables read at run time |
 
 ### fx68k – GPL-3.0-only

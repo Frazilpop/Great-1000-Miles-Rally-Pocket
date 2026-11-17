@@ -61,10 +61,11 @@ or you can use a tool like Pocket Updater.
 | Start | start |
 
 The Pocket's own menu has the usual **Display Mode** and **Controls** entries.
-Under **Core Settings** there are four options:
+Under **Core Settings** there are five options:
 
 - **Test Mode** – the arcade cabinet's operator menu
-- **Hide speed lines** – turns off the streaks the game draws at high speed
+- **Hide speed lines** – turns off the streaks the game draws at high speed. This applies to both the original GTMR, where thin speed lines are drawn on the screen, and Evolution / U.S.A. where larger 'cloud' sprites are used.
+- **Smooth top speed** – in GTMR Evolution and U.S.A. there is a top speed effect where the game moves the car three steps forward and one back on alternating frames, resulting in an intense screen shake. Apply this setting to turn off the effect – the car will instead move evenly over the same distance.
 - **Reset Game**
 - **Diagnostic overlay** – probably best to ignore this
 
@@ -103,7 +104,7 @@ Technical details
 - **Jorge Cwik (ijor)** – fx68k, the 68000 processor.
 - **Jose Tejada (jotego)** – jt6295, the sound chips.
 - **RndMnkIII** – the Analogizer and its adapter module, with **Mike Simone**'s Y/C encoder and **Till Harbaum**'s scandoubler from MiST.
-- **agg23** – the Pocket utilities used for loading, PSRAM and audio.
+- **agg23** – the Pocket utilities used for loading and audio.
 - **Analogue** – the openFPGA core framework.
 - **The MAME team** – whose work on the Kaneko boards was referenced.
 - Pocket port by **Frazilpop**.

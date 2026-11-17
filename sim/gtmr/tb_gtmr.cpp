@@ -4,7 +4,7 @@
 //   tb_gtmr <set.rom> <game id> <frames> <outdir> [dump frames, comma list]
 //          [--fb-lat N] [--rom-lat N] [--ram-lat N] [--sdram-serial N]
 //          [--inputs plan.txt]
-//          [--state-save F FILE | --state-load FILE [--load-at F] [--resave FILE]]
+//          [--state-save F FILE | --state-load FILE [--load-at F] [--resave FILE] [--plan-at F]]
 //          [--after N]
 //
 // Hosts kaneko_gtmr the way the Pocket shell does, with behavioural memories:
@@ -32,7 +32,8 @@
 // clocks spent waiting beyond a no-wait cycle, the draw's split, the
 // clocks the 68000 sat in the program's idle loop (its spare time), the
 // line IRQ4's work reached the idle loop (-1 none this frame) and whether
-// IRQ5 came first, and the four layers' latched scroll X and Y (hex).
+// IRQ5 came first, the four layers' latched scroll X and Y (hex), and the
+// random port's reads so far (rnd_reads).
 //
 // --inputs takes tools/mame_gtmr_io_profile.lua's plan file ("<frame>
 // coin=1 b2=1 right=0 ..."), so a race can be played the same way in MAME
@@ -40,15 +41,23 @@
 // smooth=1/0 (Smooth top speed) and pause=1/0 (the board's pause input); MAME has no counterpart to either.
 // w<address>=<word> writes a work-RAM word at the frame's start, as a MAME
 // script's write_u16 does in its frame notifier (w103f40=4, w1035ec=0x30).
+// (A key set in that notifier reaches the game later than the plan line of
+// the same number: tools/mame_gtmr_record.lua's plan_tb.txt allows for it.)
+// --trace-from F starts --trace at frame F.
 //
 // Save states, through the board's state window (rtl/top/kaneko_state.sv), a
 // word every 20 clocks as the Pocket's bridge gives them:
 //   --state-save F FILE  asks for a clean point at frame F, reads the state
 //                        into FILE and lets the game go on; FILE.tb gets the
-//                        harness frame of the let-go, for the loaded run's inputs
+//                        harness frame of the let-go, for the loaded run's inputs,
+//                        and with --rand-from the place in MAME's numbers. The
+//                        harness's frames go on through the freeze, so after it
+//                        the saving run's own plan comes that many frames late
 //   --state-load FILE    writes FILE into the board at frame --load-at (30)
 //                        and lets it go; the plan's inputs from the saving
-//                        run's frame of the let-go on
+//                        run's frame of the let-go on, or with --plan-at F from
+//                        frame F (the frame the state froze in: a plan
+//                        recorded in MAME counts the game's frames)
 //   --resave FILE        (with --state-load) reads the state back before the
 //                        let-go, into FILE
 //   --pocket             both through pocket/src/fpga/core/pocket_state.sv, the
@@ -158,6 +167,8 @@ int main(int argc, char** argv) {
     const char* trace_path = nullptr;
     long trace_count = 0;
     bool trace_data_only = false;
+    int  trace_from = 0;          // --trace-from F: nothing traced before frame F
+    int  plan_at = -1;            // --plan-at F: a loaded run's let-go is the plan's frame F
     bool no_sprites = false;
     const char* rand_path = nullptr;
     const char* inputs_path = nullptr;
@@ -183,6 +194,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc)   trace_path = argv[++i];
         else if (!strcmp(argv[i], "--trace-count") && i + 1 < argc) trace_count = atol(argv[++i]);
         else if (!strcmp(argv[i], "--trace-data-only"))          trace_data_only = true;
+        else if (!strcmp(argv[i], "--trace-from") && i + 1 < argc) trace_from = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--plan-at") && i + 1 < argc)  plan_at = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-sprites"))               no_sprites = true;
         else if (!strcmp(argv[i], "--rand-from") && i + 1 < argc) rand_path = argv[++i];
         else if (!strcmp(argv[i], "--inputs") && i + 1 < argc)   inputs_path = argv[++i];
@@ -379,7 +392,7 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks,draw_busy,w_psram,w_starved,f_rom,idle,irq4_end,irq5_early,sx0,sy0,sx1,sy1,sx2,sy2,sx3,sy3\n");
+    fprintf(stats, "frame,draw_clocks64,overruns,cycles,bus_cycles,as_clocks,cap_tag,shown_tag,max_wait,max_wait_addr,hold_clocks,late_lines,max_line_clocks,late_spr_lines,max_spr_line_clocks,draw_busy,w_psram,w_starved,f_rom,idle,irq4_end,irq5_early,sx0,sy0,sx1,sy1,sx2,sy2,sx3,sy3,rnd_reads\n");
     // The draw's clocks this frame: busy at all, the writer waiting on a
     // PSRAM row, the writer idle with nothing to write, the fetcher waiting
     // on the sprite ROM.
@@ -486,7 +499,7 @@ int main(int argc, char** argv) {
 
     // CPU stalls: clocks from AS asserted to DTACK, the longest per frame and
     // the clocks spent waiting beyond a no-wait cycle.
-    uint64_t as_start = 0, max_wait = 0, hold_clocks = 0;
+    uint64_t as_start = 0, max_wait = 0, hold_clocks = 0, rnd_reads = 0;   // rnd_reads: the random port's reads, all told
     uint32_t max_wait_addr = 0;
     bool waiting = false;
 
@@ -525,10 +538,15 @@ int main(int argc, char** argv) {
         for (int k = 0; k < NW; k++) sbuf[k] = (uint16_t)(b[2 * k] << 8 | b[2 * k + 1]);
     }
     int lg_saved = -1;            // the saving run's frame at its let-go
+    long rnd_saved = -1;          // and, with --rand-from, its place in MAME's random numbers
     if (load_path) {
         std::string tb = std::string(load_path) + ".tb";
         FILE* f = fopen(tb.c_str(), "r");
-        if (f) { if (fscanf(f, "%d", &lg_saved) != 1) lg_saved = -1; fclose(f); }
+        if (f) {
+            if (fscanf(f, "%d", &lg_saved) != 1) lg_saved = -1;
+            else if (fscanf(f, "%ld", &rnd_saved) != 1) rnd_saved = -1;
+            fclose(f);
+        }
     }
     auto crc_add = [](uint32_t c, const uint8_t* p, size_t n) {
         c = ~c;
@@ -570,14 +588,29 @@ int main(int argc, char** argv) {
         if (save_path && !load_path) {
             std::string tb = std::string(save_path) + ".tb";
             FILE* f = fopen(tb.c_str(), "w");
-            fprintf(f, "%d\n", frame);
+            if (!rnds.empty()) fprintf(f, "%d %zu\n", frame, rnd_i);
+            else               fprintf(f, "%d\n", frame);
             fclose(f);
+        }
+        // a loaded run takes MAME's random numbers on from where the saving
+        // run had got to (else from the first: a state's game has read
+        // thousands by then)
+        if (load_path && !rnds.empty() && rnd_saved >= 0 && (size_t)rnd_saved < rnds.size()) {
+            rnd_i = (size_t)rnd_saved; rnd_next = false;
+            R.kaneko_gtmr__DOT__dbg_rnd = rnds[rnd_i];
         }
         if (load_path && lg_saved >= 0) {
             plan_i = 0; p1v = 0; coinv = 0; startv = 0;
             t->p1 = 0; t->coin = 0; t->start = 0; t->pause = 0; t->hide_speed_lines = 0; t->smooth_top_speed = 0;
-            plan_offset = lg_saved - frame;
-            apply_inputs(lg_saved);
+            // The saving run's frames went on counting through its freeze,
+            // so its own plan's inputs came that many frames late after
+            // it, and a loaded run's follow them by default (state_test.sh
+            // compares the two runs). A plan recorded elsewhere (a MAME run)
+            // counts the game's frames: --plan-at gives the frame the state
+            // froze in, so the let-go takes the plan on from there.
+            int at = plan_at >= 0 ? plan_at : lg_saved;
+            plan_offset = at - frame;
+            apply_inputs(at);
         }
         wst = W_DONE;
     };
@@ -976,10 +1009,11 @@ int main(int argc, char** argv) {
                 // The 68000 latches read data after DTACK, so the next number
                 // goes in when this cycle ends, not now.
                 if (!rnds.empty() && a == 0x900014 && rd) rnd_next = true;
+                if (a == 0x900014 && rd) rnd_reads++;
                 if (rd && (a == ipc || a == ipc + 2)) {
                     if (!idling) { idling = true; idle_t0 = cyc; }
                 } else if (idling) { idling = false; idle += cyc - idle_t0; }
-                if (trace && !(trace_data_only && rd && a < 0x0ffffe)) {
+                if (trace && frame >= trace_from && !(trace_data_only && rd && a < 0x0ffffe)) {
                     uint32_t ds = R.kaneko_gtmr__DOT__dbg_ds;
                     uint32_t d  = rd ? R.kaneko_gtmr__DOT__dbg_din : R.kaneko_gtmr__DOT__dbg_dout;
                     uint32_t m  = (ds == 3) ? 0xffff : (ds == 2) ? 0xff00 : 0x00ff;
@@ -1023,7 +1057,7 @@ int main(int argc, char** argv) {
                     fwrite(sprimg.data(), 2, sprimg.size(), f);
                     fclose(f);
                 }
-                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,%d,%04x,%04x,%04x,%04x,%04x,%04x,%04x,%04x\n", frame,
+                fprintf(stats, "%d,%u,%u,%llu,%llu,%llu,%u,%u,%llu,%06x,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,%d,%04x,%04x,%04x,%04x,%04x,%04x,%04x,%04x,%llu\n", frame,
                         (unsigned)R.kaneko_gtmr__DOT__spr_draw_clocks,
                         (unsigned)R.kaneko_gtmr__DOT__spr_overruns,
                         (unsigned long long)cyc,
@@ -1042,7 +1076,8 @@ int main(int argc, char** argv) {
                         (unsigned)(R.kaneko_gtmr__DOT__lay_sx & 0xffff), (unsigned)(R.kaneko_gtmr__DOT__lay_sy & 0xffff),
                         (unsigned)((R.kaneko_gtmr__DOT__lay_sx >> 16) & 0xffff), (unsigned)((R.kaneko_gtmr__DOT__lay_sy >> 16) & 0xffff),
                         (unsigned)((R.kaneko_gtmr__DOT__lay_sx >> 32) & 0xffff), (unsigned)((R.kaneko_gtmr__DOT__lay_sy >> 32) & 0xffff),
-                        (unsigned)((R.kaneko_gtmr__DOT__lay_sx >> 48) & 0xffff), (unsigned)((R.kaneko_gtmr__DOT__lay_sy >> 48) & 0xffff));
+                        (unsigned)((R.kaneko_gtmr__DOT__lay_sx >> 48) & 0xffff), (unsigned)((R.kaneko_gtmr__DOT__lay_sy >> 48) & 0xffff),
+                        (unsigned long long)rnd_reads);
                 irq4_end = -1; irq5_early = 0;
                 d_busy = d_wps = d_wst = d_rom = 0;
                 idle = 0; if (idling) idle_t0 = cyc;
